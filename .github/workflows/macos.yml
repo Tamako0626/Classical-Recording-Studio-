@@ -1,40 +1,133 @@
-name: macOS desktop
+# macOS 发行包在 macos-15 上编译. arm64 为本机, x86_64 为交叉编译.
+# ffmpeg 与 ffprobe 从 sidecars 下载. 不对 Mach-O 做 UPX.
+
+name: macOS
+
 on:
-  workflow_dispatch:
   push:
-    tags: ['v*']
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "挂到已有 Release 的标签, 例如 v0.3.0. 留空则只上传 artifact"
+        required: false
+        default: ""
+
 permissions:
-  contents: read
+  contents: write
+
 jobs:
   macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            asset: macos-arm64
+            ffmpeg: ffmpeg-macos-arm64
+            ffprobe: ffprobe-macos-arm64
+          - target: x86_64-apple-darwin
+            asset: macos-x64
+            ffmpeg: ffmpeg-macos-x64
+            ffprobe: ffprobe-macos-x64
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      - run: brew install ffmpeg
-      - run: npm test
-      - run: npm run dist:mac
-      - name: Verify native bundle starts
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-${{ matrix.asset }}
+
+      - name: Format
+        if: matrix.asset == 'macos-arm64'
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: matrix.asset == 'macos-arm64'
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        if: matrix.asset == 'macos-arm64'
+        run: cargo test --lib
+
+      - name: Build
+        run: cargo build --profile release-max --target ${{ matrix.target }}
+
+      - name: Bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          executable=""
-          architecture="$(uname -m)"
-          while IFS= read -r -d '' bundle; do
-            name="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$bundle/Contents/Info.plist")"
-            candidate="$bundle/Contents/MacOS/$name"
-            if file "$candidate" | grep -q "$architecture"; then
-              executable="$candidate"
+          set -euo pipefail
+          VER=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          STAGE="ClassicalRecordingStudio-${VER}-${{ matrix.asset }}"
+          BIN="target/${{ matrix.target }}/release-max/ClassicalRecordingStudio"
+          mkdir -p "$STAGE"
+          cp "$BIN" "$STAGE/ClassicalRecordingStudio"
+          chmod +x "$STAGE/ClassicalRecordingStudio"
+          copy_sidecar() {
+            local name="$1" dest="$2"
+            local url="https://github.com/${{ github.repository }}/releases/download/sidecars/${name}"
+            local i
+            for i in $(seq 1 30); do
+              if curl -fsSL -o "$dest" "$url" && [ -s "$dest" ]; then
+                return 0
+              fi
+              echo "waiting for sidecars $name ($i)"
+              sleep 20
+            done
+            echo "missing sidecar $name" >&2
+            return 1
+          }
+          copy_sidecar "${{ matrix.ffmpeg }}" "$STAGE/ffmpeg"
+          copy_sidecar "${{ matrix.ffprobe }}" "$STAGE/ffprobe"
+          chmod +x "$STAGE/ffmpeg" "$STAGE/ffprobe"
+          curl -fsSL -o "$STAGE/ffmpeg-COPYING.txt" \
+            "https://github.com/${{ github.repository }}/releases/download/sidecars/ffmpeg-COPYING.txt"
+          curl -fsSL -o "$STAGE/ffmpeg-SOURCE.txt" \
+            "https://github.com/${{ github.repository }}/releases/download/sidecars/ffmpeg-SOURCE.txt"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$STAGE/"
+          ditto -c -k --sequesterRsrc --keepParent "$STAGE" "${STAGE}.zip"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          ls -lh "${STAGE}.zip" "$STAGE"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Attach zip to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "no release tag; skip attach"
+            exit 0
+          fi
+          for i in $(seq 1 20); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
               break
             fi
-          done < <(find release -maxdepth 2 -name '*.app' -print0)
-          test -n "$executable"
-          export STUDIO_STARTUP_CHECK_DIR="$(mktemp -d)"
-          "$executable" --startup-check
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Classical-Recording-Studio-macOS
-          path: release/*-macOS-*.zip
-          if-no-files-found: error
+            echo "waiting for release $TAG ($i)"
+            sleep 15
+          done
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "古典录音工作台 ${TAG}"
+          fi
+          gh release upload "$TAG" "${STAGE}.zip" --clobber

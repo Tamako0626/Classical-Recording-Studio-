@@ -1,60 +1,132 @@
-name: Windows desktop
+# Windows 发行包在 windows-2025 上用 release-max 编译. 不在本机编译.
+# ffmpeg 与 ffprobe 从 sidecars 下载, 不在这个 workflow 里编.
+
+name: Windows
+
 on:
-  workflow_dispatch:
   push:
-    tags: ['v*']
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "挂到已有 Release 的标签, 例如 v0.3.0. 留空则只上传 artifact"
+        required: false
+        default: ""
+
 permissions:
-  contents: read
+  contents: write
+
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      - name: Install FFmpeg for tests
-        shell: pwsh
-        run: choco install ffmpeg --yes --no-progress
-      - run: npm test
-      - run: npm run dist:win
-      - name: Verify two launches of the packaged Windows application
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x64
+
+      - name: Format
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --lib
+
+      - name: Build
+        run: cargo build --profile release-max
+
+      - name: Install UPX
         shell: pwsh
         run: |
-          $env:STUDIO_STARTUP_CHECK_DIR = Join-Path $env:RUNNER_TEMP 'studio-startup-check'
-          $exe = Join-Path $pwd 'release/win-unpacked/Classical Recording Studio.exe'
-          foreach ($launch in 1, 2) {
-            $process = Start-Process -FilePath $exe -ArgumentList '--startup-check' -PassThru
-            if (-not $process.WaitForExit(30000)) {
-              $process.Kill()
-              throw "Launch $launch timed out"
-            }
-            if ($process.ExitCode -ne 0) {
-              $report = Join-Path $env:STUDIO_STARTUP_CHECK_DIR 'startup-error.log'
-              if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
-              throw "Launch $launch failed ($($process.ExitCode))"
-            }
-          }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Classical-Recording-Studio-Windows-x64
-          path: release/*.exe
-          if-no-files-found: error
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    needs: windows
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: Classical-Recording-Studio-Windows-x64
-          path: release
-      - name: Create GitHub Release
+          choco install upx -y --no-progress
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Bundle
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" release/*.exe --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $match = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw "Cargo.toml has no version" }
+          $ver = $match.Matches[0].Groups[1].Value
+          $stage = "ClassicalRecordingStudio-$ver-windows-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release-max/ClassicalRecordingStudio.exe" (Join-Path $stage "ClassicalRecordingStudio.exe")
+          Write-Host "UPX ClassicalRecordingStudio.exe"
+          & upx --best --lzma (Join-Path $stage "ClassicalRecordingStudio.exe")
+          if ($LASTEXITCODE -ne 0) { throw "upx failed: $LASTEXITCODE" }
+
+          function Get-Sidecar($name, $dest) {
+            $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/$name"
+            $ok = $false
+            for ($i = 1; $i -le 30; $i++) {
+              curl.exe -fsSL -o $dest $url
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $dest) -and ((Get-Item $dest).Length -gt 0)) {
+                $ok = $true
+                break
+              }
+              Write-Host "waiting for sidecars $name ($i)"
+              Start-Sleep -Seconds 20
+            }
+            if (-not $ok) { throw "missing sidecar $name" }
+          }
+          Get-Sidecar "ffmpeg-windows-x64.exe" (Join-Path $stage "ffmpeg.exe")
+          Get-Sidecar "ffprobe-windows-x64.exe" (Join-Path $stage "ffprobe.exe")
+          curl.exe -fsSL -o (Join-Path $stage "ffmpeg-COPYING.txt") "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/ffmpeg-COPYING.txt"
+          curl.exe -fsSL -o (Join-Path $stage "ffmpeg-SOURCE.txt") "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/ffmpeg-SOURCE.txt"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md $stage
+          tar.exe -a -c -f "$stage.zip" $stage
+          if ($LASTEXITCODE -ne 0) { throw "zip failed" }
+          "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
+          Get-ChildItem $stage, "$stage.zip" | Format-Table Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Attach zip to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = ""
+          if ($env:INPUT_TAG) {
+            $tag = $env:INPUT_TAG
+          } elseif ($env:GITHUB_REF -like "refs/tags/*") {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          if (-not $tag) {
+            Write-Host "no release tag; skip attach"
+            exit 0
+          }
+          $found = $false
+          for ($i = 1; $i -le 20; $i++) {
+            gh release view $tag
+            if ($LASTEXITCODE -eq 0) { $found = $true; break }
+            Write-Host "waiting for release $tag ($i)"
+            Start-Sleep -Seconds 15
+          }
+          if (-not $found) {
+            gh release create $tag --title $tag --notes "古典录音工作台 $tag"
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          }
+          gh release upload $tag "$env:STAGE.zip" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }

@@ -1,0 +1,210 @@
+# 裁剪版 ffmpeg 与 ffprobe. Windows 用 windows-2025 + MSVC, 成品无 msys dll.
+# MSYS2 只提供 GNU make 和 pkg-config. 编译器是 cl, ffmpeg --toolchain=msvc.
+# macOS 不 UPX. 成品 cache 命中则跳过编译. 成功后挂到 sidecars release.
+
+name: slim ffmpeg
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - scripts/build_ffmpeg.sh
+      - .github/workflows/ffmpeg.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ffmpeg-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  ffmpeg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x64
+            os: windows-2025
+            arch: x86_64
+            target: msvc
+            ffmpeg: ffmpeg-windows-x64.exe
+            ffprobe: ffprobe-windows-x64.exe
+          - id: macos-arm64
+            os: macos-15
+            arch: arm64
+            target: native
+            ffmpeg: ffmpeg-macos-arm64
+            ffprobe: ffprobe-macos-arm64
+          - id: macos-x64
+            os: macos-15
+            arch: x86_64
+            target: native
+            ffmpeg: ffmpeg-macos-x64
+            ffprobe: ffprobe-macos-x64
+          - id: linux-x64
+            os: ubuntu-24.04
+            arch: x86_64
+            target: native
+            ffmpeg: ffmpeg-linux-x64
+            ffprobe: ffprobe-linux-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      SRC_CACHE_KEY: crs-ffmpeg-src-n7.1.1-lame-zlib
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore slim binaries
+        id: bin
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/ffmpeg-slim
+          key: ffmpeg-bin-${{ matrix.id }}-${{ hashFiles('scripts/build_ffmpeg.sh') }}
+
+      - name: Restore sources
+        if: steps.bin.outputs.cache-hit != 'true'
+        id: src
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/crs-ffmpeg/src
+          key: ${{ env.SRC_CACHE_KEY }}
+
+      - name: Setup MSVC
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Setup MSYS2 make
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: false
+          install: make pkg-config
+          path-type: inherit
+
+      - name: Install Windows build deps
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install nasm upx ninja -y --no-progress
+          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux' && steps.bin.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm make pkg-config upx-ucl zlib1g-dev
+
+      - name: Install macOS build deps
+        if: runner.os == 'macOS' && steps.bin.outputs.cache-hit != 'true'
+        run: brew install nasm pkgconf
+
+      - name: Build slim ffmpeg (Windows MSVC)
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          export PATH="/c/Program Files/CMake/bin:/c/Program Files/NASM:/c/ProgramData/chocolatey/bin:$PATH"
+          bash scripts/build_ffmpeg.sh \
+            --out-dir vendor/ffmpeg-slim \
+            --work-dir "$RUNNER_TEMP/crs-ffmpeg" \
+            --arch ${{ matrix.arch }} \
+            --target ${{ matrix.target }}
+
+      - name: Build slim ffmpeg
+        if: matrix.target != 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_ffmpeg.sh \
+            --out-dir vendor/ffmpeg-slim \
+            --work-dir "$RUNNER_TEMP/crs-ffmpeg" \
+            --arch ${{ matrix.arch }} \
+            --target ${{ matrix.target }}
+
+      - name: Strip objects before saving sources
+        if: steps.bin.outputs.cache-hit != 'true' && steps.src.outputs.cache-hit != 'true' && matrix.id == 'windows-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${RUNNER_TEMP}/crs-ffmpeg/src"
+          [ -d "$SRC" ] || exit 0
+          find "$SRC" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.a' -o -name '*.lib' -o -name '*.exe' -o -name 'ffmpeg' -o -name 'ffprobe' \) -delete 2>/dev/null || true
+
+      - name: Save sources
+        if: steps.bin.outputs.cache-hit != 'true' && steps.src.outputs.cache-hit != 'true' && matrix.id == 'windows-x64'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/crs-ffmpeg/src
+          key: ${{ env.SRC_CACHE_KEY }}
+
+      - name: Save slim binaries
+        if: steps.bin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/ffmpeg-slim
+          key: ffmpeg-bin-${{ matrix.id }}-${{ hashFiles('scripts/build_ffmpeg.sh') }}
+
+      - name: Stage assets
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ -f vendor/ffmpeg-slim/ffmpeg.exe ]; then
+            cp vendor/ffmpeg-slim/ffmpeg.exe "dist/${{ matrix.ffmpeg }}"
+            cp vendor/ffmpeg-slim/ffprobe.exe "dist/${{ matrix.ffprobe }}"
+          else
+            cp vendor/ffmpeg-slim/ffmpeg "dist/${{ matrix.ffmpeg }}"
+            cp vendor/ffmpeg-slim/ffprobe "dist/${{ matrix.ffprobe }}"
+          fi
+          chmod +x "dist/${{ matrix.ffmpeg }}" "dist/${{ matrix.ffprobe }}" || true
+          cp vendor/ffmpeg-slim/ffmpeg-COPYING.txt dist/ 2>/dev/null || true
+          cp vendor/ffmpeg-slim/ffmpeg-SOURCE.txt dist/ 2>/dev/null || true
+          ls -lh dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.ffmpeg }}
+          path: |
+            dist/${{ matrix.ffmpeg }}
+            dist/${{ matrix.ffprobe }}
+
+      - name: Publish to sidecars release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view sidecars >/dev/null 2>&1; then
+            gh release create sidecars --title sidecars --notes "裁剪版 ffmpeg 与 ffprobe" || true
+          fi
+          upload() {
+            local f="$1"
+            local i
+            for i in 1 2 3 4 5; do
+              if gh release upload sidecars "$f" --clobber; then
+                return 0
+              fi
+              echo "upload $f failed, retry $i"
+              sleep $((i * 3))
+            done
+            return 1
+          }
+          upload "dist/${{ matrix.ffmpeg }}"
+          upload "dist/${{ matrix.ffprobe }}"
+          if [ "${{ matrix.id }}" = "windows-x64" ]; then
+            if [ -f dist/ffmpeg-COPYING.txt ]; then
+              upload dist/ffmpeg-COPYING.txt
+            fi
+            if [ -f dist/ffmpeg-SOURCE.txt ]; then
+              upload dist/ffmpeg-SOURCE.txt
+            fi
+          fi

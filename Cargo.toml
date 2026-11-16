@@ -1,0 +1,38 @@
+[package]
+name = "classical_recording_studio"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+description = "古典录音工作台"
+publish = false
+
+[lib]
+name = "classical_recording_studio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ClassicalRecordingStudio"
+path = "src/main.rs"
+
+[dependencies]
+async-channel = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+encoding_rs = "0.8"
+gpui-kit = "0.10"
+rfd = "0.15"
+rodio = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = false
+codegen-units = 16
+opt-level = 3
+strip = true
+
+[profile.release-max]
+inherits = "release"
+lto = true
+codegen-units = 1
