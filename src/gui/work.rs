@@ -10,7 +10,7 @@ use gpui_kit::component::{
     radio::RadioGroup,
     switch::Switch,
 };
-use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div};
+use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px};
 
 use crate::catalog;
 use crate::cue::{self, CueTrack};
@@ -31,13 +31,17 @@ const CD_EXT: &[&str] = &["wav", "flac", "mp3", "mkv", "ape", "m4a", "aac", "aif
 impl Studio {
     pub(super) fn split_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(project) = self.project().cloned() else {
-            return div().child(Label::new("请先建立或打开一个项目.")).into_any_element();
+            return super::surface().child(Label::new("请先建立或打开一个项目.")).into_any_element();
         };
-        let mut page = div().flex().flex_col().gap_3();
-        page = page.child(session_form(self)).child(output_form(self)).child(self.settings_block(&project.settings, cx)).child(self.effects_block(&project, cx));
-        page = page.child(self.source_block(&project, cx)).child(self.track_block(&project, cx)).child(self.actions(cx));
+        let mut page = div().flex().flex_col().gap(px(16.));
+        page = page
+            .child(super::surface().child(Label::new("演出与录音")).child(session_form(self)))
+            .child(super::surface().child(Label::new("输出")).child(output_form(self)))
+            .child(super::surface().child(self.settings_block(&project.settings, cx)))
+            .child(super::surface().child(self.effects_block(&project, cx)));
+        page = page.child(super::surface().child(self.source_block(&project, cx))).child(super::surface().child(self.track_block(&project, cx))).child(super::surface().child(self.actions(cx)));
         if !self.mb_hits.is_empty() {
-            page = page.child(self.mb_block(cx));
+            page = page.child(super::surface().child(self.mb_block(cx)));
         }
         page.into_any_element()
     }
@@ -288,10 +292,7 @@ impl Studio {
                     .on_click(cx.listener(move |this, _, window, cx| this.select_cd(index, window, cx))),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
+        super::surface()
             .child(Label::new(self.cd_notice.clone()))
             .child(
                 div()
@@ -314,10 +315,7 @@ impl Studio {
         for path in &self.video_files {
             files = files.child(Label::new(path.display().to_string()));
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
+        super::surface()
             .child(Label::new("用一张静态封面和音轨做成 1920x1080 的 H.264 视频. 48 kHz 及以上的无损音轨在自动模式下使用 MKV."))
             .child(
                 div()
@@ -349,10 +347,7 @@ impl Studio {
         for entry in self.workspace.logs.iter().rev().filter(|entry| current.as_ref().is_none_or(|id| entry.project_id == *id)).take(80) {
             list = list.child(Label::new(format!("{}  {}  {}  {}  {}", entry.time, entry.project_name, entry.operation, entry.result, entry.message)));
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
+        super::surface()
             .child(Label::new("只显示当前项目. 没有打开项目时显示全部."))
             .child(Button::new("clear-logs").small().danger().label("清除当前项目的记录").on_click(cx.listener(|this, _, _, cx| {
                 if let Some(id) = this.project().map(|project| project.id.clone()) {
@@ -380,10 +375,7 @@ impl Studio {
                 ),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
+        super::surface()
             .child(Label::new("模板保存格式, 采样率, 增益, 后期, 命名规则和输出文件夹."))
             .child(Button::new("save-template").primary().label("把当前项目存为模板").on_click(cx.listener(|this, _, _, cx| this.save_template(cx))))
             .child(list)
@@ -409,10 +401,7 @@ impl Studio {
                 review = review.child(Label::new(item.note.clone()));
             }
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
+        super::surface()
             .child(Label::new("API Key 只保存在本机, 不写入项目文件."))
             .child(Form::new().child(super::field("接口", &self.llm_base)).child(super::field("模型", &self.llm_model)).child(Field::new().label("API Key").child(Input::new(&self.llm_key).small().content_type(gpui_kit::component::input::InputContentType::Password).mask_toggle())))
             .child(

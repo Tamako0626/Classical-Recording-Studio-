@@ -5,16 +5,16 @@ mod work;
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     form::Field,
     input::{Input, InputEvent, InputState},
-    label::Label,
+    Theme,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement, Render,
+    App, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, WindowBounds,
-    WindowOptions, application, assets, div, init, open_window, px, size,
+    WindowOptions, application, assets, div, init, open_window, px, rgb, size,
 };
 
 use crate::export::TrackReport;
@@ -562,51 +562,159 @@ impl Studio {
         cx.notify();
     }
 
-    fn nav_button(&self, id: &'static str, label: &'static str, page: Page, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        Button::new(id)
-            .label(label)
-            .selected(self.page == page)
-            .ghost()
-            .small()
+    fn nav_button(&self, id: &'static str, mark: &'static str, label: &'static str, page: Page, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let selected = self.page == page;
+        let mut item = div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .px(px(12.))
+            .py(px(10.))
+            .rounded(px(9.))
+            .text_color(if selected { rgb(0xffffff) } else { rgb(0xe1d9ee) })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.pull(cx);
                 this.page = page;
                 cx.notify();
-            }))
-            .into_any_element()
+            }));
+        if selected {
+            item = item.bg(rgb(0x42335f));
+        }
+        item.child(div().w(px(19.)).text_color(rgb(0xc6afff)).child(mark)).child(label).into_any_element()
     }
 
     fn projects_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col().gap_2();
+        let total = self.workspace.projects.len();
+        let done = self.workspace.projects.iter().filter(|project| project.status == "已完成").count();
+        let repair = self.workspace.projects.iter().filter(|project| matches!(project.status.as_str(), "处理失败" | "需修复")).count();
+        let open = total.saturating_sub(done + repair);
+        let mut rows = div().flex().flex_col();
+        if self.workspace.projects.is_empty() {
+            rows = rows.child(div().p(px(28.)).text_color(rgb(0x66647a)).child("还没有录音项目."));
+        }
         for index in 0..self.workspace.projects.len() {
             let project = &self.workspace.projects[index];
             let id = project.id.clone();
-            let title = if project.name.trim().is_empty() {
-                "未命名项目".to_string()
+            let title = if project.name.trim().is_empty() { "未命名项目".to_string() } else { project.name.clone() };
+            let mark = title.chars().next().unwrap_or('项').to_string();
+            let place = [project.date.as_str(), project.city.as_str(), project.venue.as_str()]
+                .into_iter()
+                .filter(|item| !item.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let meta = if place.is_empty() {
+                format!("{} 个文件", project.sources.len())
             } else {
-                project.name.clone()
+                format!("{place}  ·  {} 个文件", project.sources.len())
             };
-            let meta = format!("{}  {}  {}", project.date, project.status, project.sources.len());
-            list = list.child(
+            let status = project.status.clone();
+            let last = index + 1 == total;
+            rows = rows.child(
                 div()
+                    .px(px(19.))
+                    .py(px(11.))
+                    .border_t_1()
+                    .border_color(rgb(0xede9f3))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(Button::new(SharedString::from(format!("open-{id}"))).label(title).on_click(cx.listener(move |this, _, window, cx| this.select_project(index, window, cx))))
-                    .child(Label::new(meta))
-                    .child(Button::new(SharedString::from(format!("up-{id}"))).small().label("上移").disabled(index == 0).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, -1, window, cx))))
-                    .child(Button::new(SharedString::from(format!("down-{id}"))).small().label("下移").disabled(index + 1 == self.workspace.projects.len()).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, 1, window, cx))))
-                    .child(Button::new(SharedString::from(format!("del-{id}"))).small().danger().label("删除").on_click(cx.listener(move |this, _, window, cx| this.delete_project(index, window, cx)))),
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .w(px(34.))
+                            .h(px(34.))
+                            .rounded(px(8.))
+                            .bg(rgb(0xeee6fb))
+                            .text_color(rgb(0x6446a1))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(mark),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(title)
+                            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(meta)),
+                    )
+                    .child(status_badge(&status))
+                    .child(Button::new(SharedString::from(format!("open-{id}"))).small().label("打开").on_click(cx.listener(move |this, _, window, cx| this.select_project(index, window, cx))))
+                    .child(Button::new(SharedString::from(format!("up-{id}"))).xsmall().ghost().label("上移").disabled(index == 0).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, -1, window, cx))))
+                    .child(Button::new(SharedString::from(format!("down-{id}"))).xsmall().ghost().label("下移").disabled(last).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, 1, window, cx))))
+                    .child(Button::new(SharedString::from(format!("del-{id}"))).xsmall().ghost().danger().label("删除").on_click(cx.listener(move |this, _, window, cx| this.delete_project(index, window, cx)))),
             );
         }
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            .child(div().flex().gap_2().child(Button::new("new-project").primary().label("新建项目").on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx)))).child(Button::new("open-file").label("打开项目文件").on_click(cx.listener(|this, _, window, cx| this.open_file(window, cx)))).child(Button::new("save-file").label("保存为项目文件").on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx)))))
-            .child(Label::new("删除项目只移出工作台, 不删除磁盘上的录音和导出文件."))
-            .child(list)
+            .gap(px(16.))
+            .child(
+                div()
+                    .p(px(29.))
+                    .rounded(px(18.))
+                    .bg(rgb(0xeee8fa))
+                    .border_1()
+                    .border_color(rgb(0xe5dcf5))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(22.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(div().text_size(px(28.)).child("录音项目"))
+                            .child(div().text_color(rgb(0x5c5470)).child("归档演出录音, 管理分轨, 专辑标签, 封面和处理进度.")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(Button::new("open-file").label("打开项目文件").on_click(cx.listener(|this, _, window, cx| this.open_file(window, cx))))
+                            .child(Button::new("save-file").label("保存为项目文件").on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx)))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(12.))
+                    .child(stat_card(total, "全部项目", "▤"))
+                    .child(stat_card(open, "整理中", "◷"))
+                    .child(stat_card(done, "已完成", "✓"))
+                    .child(stat_card(repair, "待修复", "◇")),
+            )
+            .child(
+                div()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0xe5e1ed))
+                    .rounded(px(14.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px(px(19.))
+                            .py(px(14.))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_size(px(16.)).child("项目列表"))
+                            .child(Button::new("new-project").primary().label("新建项目").on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx)))),
+                    )
+                    .child(rows)
+                    .child(div().px(px(19.)).py(px(11.)).border_t_1().border_color(rgb(0xede9f3)).text_size(px(11.)).text_color(rgb(0x66647a)).child("删除项目只移出工作台, 不删除磁盘上的录音和导出文件.")),
+            )
     }
 
     fn create_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -704,49 +812,131 @@ impl Studio {
     }
 
     fn header(&self) -> impl IntoElement {
-        let title = match self.page {
-            Page::Projects => "录音项目",
-            Page::Split => "整场录音分轨",
-            Page::Cd => "CD 抓轨整理",
-            Page::Video => "封面视频",
-            Page::History => "处理记录",
-            Page::Templates => "模板与命名",
-            Page::Llm => "模型配置",
-        };
-        div().px_4().py_3().flex().flex_row().items_center().justify_between().child(Label::new(title)).child(Label::new(self.status.clone()))
+        let (title, detail) = page_copy(self.page);
+        div()
+            .h(px(64.))
+            .px(px(30.))
+            .bg(rgb(0xffffff))
+            .border_b_1()
+            .border_color(rgb(0xe5e1ed))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(div().text_color(rgb(0x66647a)).child("工作区"))
+                    .child(div().text_color(rgb(0x66647a)).child("/"))
+                    .child(title)
+                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(detail)),
+            )
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(self.status.clone()))
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = div().px_4().py_2().flex().gap_2().items_center();
-        if let Some(error) = &self.error {
-            row = row.child(Label::new(error.clone())).child(Button::new("clear-error").xsmall().label("关闭").on_click(cx.listener(|this, _, _, cx| {
+        let Some(error) = &self.error else {
+            return div();
+        };
+        div()
+            .mx(px(30.))
+            .mb(px(16.))
+            .px(px(11.))
+            .py(px(9.))
+            .rounded(px(9.))
+            .bg(rgb(0xfff5e4))
+            .border_1()
+            .border_color(rgb(0xedd09b))
+            .text_color(rgb(0x705018))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(error.clone())
+            .child(Button::new("clear-error").xsmall().ghost().label("关闭").on_click(cx.listener(|this, _, _, cx| {
                 this.error = None;
                 cx.notify();
-            })));
-        }
-        row
+            })))
     }
 }
 
 impl Render for Studio {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = div()
-            .w(px(196.))
+            .w(px(226.))
             .h_full()
-            .p_3()
+            .px(px(16.))
+            .pt(px(27.))
+            .pb(px(18.))
             .flex()
             .flex_col()
-            .gap_1()
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .child(Label::new("古典录音工作台"))
-            .child(self.nav_button("nav-projects", "录音项目", Page::Projects, cx))
-            .child(self.nav_button("nav-split", "整场分轨", Page::Split, cx))
-            .child(self.nav_button("nav-cd", "CD 抓轨", Page::Cd, cx))
-            .child(self.nav_button("nav-video", "封面视频", Page::Video, cx))
-            .child(self.nav_button("nav-history", "处理记录", Page::History, cx))
-            .child(self.nav_button("nav-templates", "模板与命名", Page::Templates, cx))
-            .child(self.nav_button("nav-llm", "模型配置", Page::Llm, cx))
+            .bg(rgb(0x211b35))
+            .text_color(rgb(0xf5efff))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(11.))
+                    .px(px(5.))
+                    .child(
+                        div()
+                            .w(px(38.))
+                            .h(px(38.))
+                            .rounded(px(11.))
+                            .bg(rgb(0x7655ca))
+                            .text_color(rgb(0xffffff))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(20.))
+                            .child("♫"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child("古典录音工作台")
+                            .child(div().text_size(px(8.)).text_color(rgb(0xc7b7ea)).child("CLASSICAL RECORDINGS")),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(43.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .child(div().px(px(12.)).mb(px(4.)).text_size(px(11.)).text_color(rgb(0xbcb0d2)).child("工作区"))
+                    .child(self.nav_button("nav-projects", "▤", "录音项目", Page::Projects, cx))
+                    .child(self.nav_button("nav-split", "✂", "整场录音分轨", Page::Split, cx))
+                    .child(self.nav_button("nav-cd", "◉", "CD 抓轨整理", Page::Cd, cx))
+                    .child(self.nav_button("nav-video", "▶", "封面视频", Page::Video, cx))
+                    .child(self.nav_button("nav-history", "◷", "处理记录", Page::History, cx))
+                    .child(self.nav_button("nav-templates", "▧", "模板与命名", Page::Templates, cx))
+                    .child(self.nav_button("nav-llm", "✦", "模型配置", Page::Llm, cx)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .pt(px(12.))
+                    .px(px(8.))
+                    .border_t_1()
+                    .border_color(rgb(0x453b59))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(9.))
+                    .text_size(px(11.))
+                    .text_color(rgb(0xd6c9e9))
+                    .child(div().w(px(7.)).h(px(7.)).rounded(px(7.)).bg(rgb(0xa5e4be)))
+                    .child("本机工作区"),
+            )
             .into_any_element();
         let header = self.header().into_any_element();
         let footer = self.footer(cx).into_any_element();
@@ -774,7 +964,7 @@ impl Render for Studio {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .child(div().id("page-body").flex_1().min_h(px(0.)).overflow_y_scroll().p_4().child(page))
+                    .child(div().id("page-body").flex_1().min_h(px(0.)).overflow_y_scroll().px(px(30.)).py(px(24.)).child(div().w_full().max_w(px(1540.)).child(page)))
                     .child(footer),
             )
     }
@@ -783,10 +973,81 @@ impl Render for Studio {
 pub fn run() {
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
+        apply_studio_theme(cx);
         let mut options = WindowOptions::default();
         options.window_bounds = Some(WindowBounds::centered(size(px(1280.), px(840.)), cx));
         open_window(options, cx, |window, cx| cx.new(|cx| Studio::new(window, cx))).expect("无法打开窗口");
     });
+}
+
+fn apply_studio_theme(cx: &mut App) {
+    Theme::update(cx, |theme| {
+        theme.background = rgb(0xf8f7fb).into();
+        theme.foreground = rgb(0x222037).into();
+        theme.border = rgb(0xe5e1ed).into();
+        theme.primary = rgb(0x5a3da8).into();
+        theme.primary_foreground = rgb(0xffffff).into();
+        theme.primary_hover = rgb(0x4b2e93).into();
+        theme.primary_active = rgb(0x3d2778).into();
+        theme.muted_foreground = rgb(0x66647a).into();
+        theme.radius = px(8.);
+        theme.radius_lg = px(14.);
+        theme.font_family = "Microsoft YaHei".into();
+        theme.font_size = px(14.);
+    });
+}
+
+pub(super) fn surface() -> Div {
+    div().bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.)).p(px(19.)).flex().flex_col().gap_2()
+}
+
+fn page_copy(page: Page) -> (&'static str, &'static str) {
+    match page {
+        Page::Projects => ("录音项目", "归档演出录音, 管理分轨, 专辑标签, 封面和处理进度."),
+        Page::Split => ("整场录音分轨", "按时间点切开整场录音, 写入标签, 封面和增益."),
+        Page::Cd => ("CD 抓轨整理", "读取 CUE 和分轨音频, 导入到当前项目."),
+        Page::Video => ("封面视频", "用静态封面和音轨做成 1920x1080 的 H.264 视频."),
+        Page::History => ("处理记录", "查看导出, 试听和导入留下的记录."),
+        Page::Templates => ("模板与命名", "保存格式, 采样率, 增益, 后期和命名规则."),
+        Page::Llm => ("模型配置", "API Key 只留在本机, 不写入项目文件."),
+    }
+}
+
+fn stat_card(value: usize, label: &'static str, mark: &'static str) -> impl IntoElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.))
+        .p(px(14.))
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0xe5e1ed))
+        .rounded(px(14.))
+        .child(
+            div()
+                .w(px(36.))
+                .h(px(36.))
+                .rounded(px(9.))
+                .bg(rgb(0xf0e9fb))
+                .text_color(rgb(0x5b3a9c))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(mark),
+        )
+        .child(div().flex().flex_col().gap(px(4.)).child(div().text_size(px(24.)).child(value.to_string())).child(div().text_size(px(11.)).text_color(rgb(0x66647a)).child(label)))
+}
+
+fn status_badge(status: &str) -> Div {
+    let (background, foreground) = match status {
+        "已完成" => (0xe2f3e9, 0x256249),
+        "处理失败" | "需修复" => (0xfce7eb, 0xa32747),
+        "待核对时间点" => (0xfff0d7, 0x815617),
+        _ => (0xf0eaf8, 0x5d3d98),
+    };
+    div().px(px(8.)).py(px(4.)).rounded(px(999.)).bg(rgb(background)).text_color(rgb(foreground)).text_size(px(11.)).child(status.to_string())
 }
 
 fn text(input: &Entity<InputState>, cx: &App) -> String {
