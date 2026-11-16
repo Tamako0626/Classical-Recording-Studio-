@@ -154,9 +154,9 @@ pub fn suggest_english(config: &LlmConfig, project: &Project) -> StudioResult<Ve
             key: (*key).into(),
             label: (*label).into(),
             before,
+            apply: !after.is_empty(),
             after,
             note,
-            apply: !after.is_empty(),
         });
     }
     Ok(suggestions)

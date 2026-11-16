@@ -12,9 +12,9 @@ use gpui_kit::component::{
     label::Label,
 };
 use gpui_kit::{
-    App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Task, Window, WindowBounds, WindowOptions, application, assets, div, init,
-    open_window, px, size,
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, WindowBounds,
+    WindowOptions, application, assets, div, init, open_window, px, size,
 };
 
 use crate::export::TrackReport;
@@ -370,46 +370,80 @@ impl Studio {
         if !self.ready {
             return;
         }
+        let name = text(&self.name, cx);
+        let performer = text(&self.performer, cx);
+        let conductor = text(&self.conductor, cx);
+        let orchestra = text(&self.orchestra, cx);
+        let composer = text(&self.composer, cx);
+        let date = text(&self.date, cx);
+        let album_date = text(&self.album_date, cx);
+        let city = text(&self.city, cx);
+        let venue = text(&self.venue, cx);
+        let origin = text(&self.origin, cx);
+        let output = text(&self.output, cx);
+        let naming = text(&self.naming, cx);
+        let notes = text(&self.notes, cx);
+        let gain = number(&self.gain, cx, 0.0);
+        let width = number(&self.width, cx, 100.0);
+        let reverb = number(&self.reverb, cx, 0.0);
+        let noise_reduction = number(&self.noise_reduction, cx, 8.0);
+        let highpass = number(&self.highpass, cx, 0.0);
+        let lowpass = number(&self.lowpass, cx, 0.0);
+        let bass = number(&self.bass, cx, 0.0);
+        let mid = number(&self.mid, cx, 0.0);
+        let treble = number(&self.treble, cx, 0.0);
+        let gate = number(&self.gate, cx, 0.0);
+        let compress = number(&self.compress, cx, 1.0);
+        let threshold = number(&self.threshold, cx, -18.0);
+        let lufs = number(&self.lufs, cx, -18.0);
+        let fade_in = number(&self.fade_in, cx, 0.0);
+        let fade_out = number(&self.fade_out, cx, 0.0);
+        let limiter = if self.limiter_on { number(&self.limiter, cx, -1.0) } else { 0.0 };
+        let track_index = self.track_index;
+        let start = text(&self.start, cx);
+        let end = text(&self.end, cx);
+        let filename = text(&self.filename, cx);
+        let tags = self.tags.iter().map(|input| text(input, cx)).collect::<Vec<_>>();
         let Some(project) = self.project_mut() else {
             return;
         };
-        project.name = text(&self.name, cx);
-        project.performer = text(&self.performer, cx);
-        project.conductor = text(&self.conductor, cx);
-        project.orchestra = text(&self.orchestra, cx);
-        project.composer = text(&self.composer, cx);
-        project.date = text(&self.date, cx);
-        project.album_date = text(&self.album_date, cx);
-        project.city = text(&self.city, cx);
-        project.venue = text(&self.venue, cx);
-        project.origin = text(&self.origin, cx);
-        project.output = text(&self.output, cx);
+        project.name = name;
+        project.performer = performer;
+        project.conductor = conductor;
+        project.orchestra = orchestra;
+        project.composer = composer;
+        project.date = date;
+        project.album_date = album_date;
+        project.city = city;
+        project.venue = venue;
+        project.origin = origin;
+        project.output = output;
         project.auto_output = project.output.trim().is_empty();
-        project.naming_rule = text(&self.naming, cx);
-        project.notes = text(&self.notes, cx);
-        project.settings.gain = number(&self.gain, cx, 0.0);
-        project.settings.width = number(&self.width, cx, 100.0);
-        project.settings.reverb = number(&self.reverb, cx, 0.0);
+        project.naming_rule = naming;
+        project.notes = notes;
+        project.settings.gain = gain;
+        project.settings.width = width;
+        project.settings.reverb = reverb;
         let effects = &mut project.settings.effects;
-        effects.noise_reduction = number(&self.noise_reduction, cx, 8.0);
-        effects.highpass = number(&self.highpass, cx, 0.0);
-        effects.lowpass = number(&self.lowpass, cx, 0.0);
-        effects.bass = number(&self.bass, cx, 0.0);
-        effects.mid = number(&self.mid, cx, 0.0);
-        effects.treble = number(&self.treble, cx, 0.0);
-        effects.gate = number(&self.gate, cx, 0.0);
-        effects.compress = number(&self.compress, cx, 1.0);
-        effects.threshold = number(&self.threshold, cx, -18.0);
-        effects.lufs = number(&self.lufs, cx, -18.0);
-        effects.fade_in = number(&self.fade_in, cx, 0.0);
-        effects.fade_out = number(&self.fade_out, cx, 0.0);
-        effects.limiter = if self.limiter_on { number(&self.limiter, cx, -1.0) } else { 0.0 };
-        if let Some(track) = self.track_index.and_then(|index| project.tracks.get_mut(index)) {
-            track.start = text(&self.start, cx);
-            track.end = text(&self.end, cx);
-            track.filename = text(&self.filename, cx);
-            for (key, input) in TAG_KEYS.iter().zip(self.tags.iter()) {
-                track.tags.set(key, text(input, cx));
+        effects.noise_reduction = noise_reduction;
+        effects.highpass = highpass;
+        effects.lowpass = lowpass;
+        effects.bass = bass;
+        effects.mid = mid;
+        effects.treble = treble;
+        effects.gate = gate;
+        effects.compress = compress;
+        effects.threshold = threshold;
+        effects.lufs = lufs;
+        effects.fade_in = fade_in;
+        effects.fade_out = fade_out;
+        effects.limiter = limiter;
+        if let Some(track) = track_index.and_then(|index| project.tracks.get_mut(index)) {
+            track.start = start;
+            track.end = end;
+            track.filename = filename;
+            for (key, value) in TAG_KEYS.iter().zip(tags) {
+                track.tags.set(key, value);
             }
         }
     }
@@ -541,7 +575,7 @@ impl Studio {
             .into_any_element()
     }
 
-    fn projects_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn projects_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col().gap_2();
         for index in 0..self.workspace.projects.len() {
             let project = &self.workspace.projects[index];
@@ -649,7 +683,7 @@ impl Studio {
         self.mark_dirty(cx);
     }
 
-    fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         let Some(project) = self.project().cloned() else {
             self.show_error("请先建立项目.", cx);
@@ -782,7 +816,7 @@ fn fmt_num(value: f64) -> String {
     }
 }
 
-fn field<'a>(label: &'static str, input: &'a Entity<InputState>) -> impl IntoElement + 'a {
+fn field(label: &'static str, input: &Entity<InputState>) -> Field {
     Field::new().label(label).child(Input::new(input).small())
 }
 

@@ -56,7 +56,7 @@ impl Studio {
                     .selected_index(format_index)
                     .on_change(cx.listener(|this, index, _, cx| {
                         if let Some(project) = this.project_mut() {
-                            project.settings.format = ["FLAC", "WAV", "MP3", "MKV"][*index].into();
+                            project.settings.format = ["FLAC", "WAV", "MP3", "MKV"][*index].to_string();
                         }
                         this.mark_dirty(cx);
                     })),
@@ -505,10 +505,13 @@ impl Studio {
 
     fn add_track(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
+        let source = self
+            .track_index
+            .and_then(|index| self.project().and_then(|project| project.tracks.get(index)).map(|track| track.source.clone()))
+            .unwrap_or_default();
         let Some(project) = self.project_mut() else {
             return;
         };
-        let source = self.track_index.and_then(|index| project.tracks.get(index)).map(|track| track.source.clone()).unwrap_or_default();
         let mut track = Track::blank();
         track.source = source;
         project.tracks.push(track);

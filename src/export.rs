@@ -365,7 +365,7 @@ fn verify_output(info: &MediaInfo, plan: &Plan, job: &Job, span: Option<f64>) ->
         let keys: &[&str] = if plan.format == "WAV" {
             &["Title", "Artist", "Album", "Track", "Date"]
         } else {
-            TAG_KEYS
+            &TAG_KEYS
         };
         for key in keys {
             let expected = job.tags.get(key).trim();
@@ -376,7 +376,7 @@ fn verify_output(info: &MediaInfo, plan: &Plan, job: &Job, span: Option<f64>) ->
             if expected == actual {
                 continue;
             }
-            if *key == "Track" {
+            if key == "Track" {
                 if let (Ok(left), Ok(right)) = (expected.parse::<u32>(), actual.parse::<u32>()) {
                     if left == right {
                         continue;

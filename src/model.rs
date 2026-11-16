@@ -422,7 +422,7 @@ fn default_naming_rule() -> String {
 }
 
 fn default_templates() -> Vec<Template> {
-    let naming = DEFAULT_NAMING.into();
+    let naming: String = DEFAULT_NAMING.into();
     vec![
         Template {
             id: "archive-flac".into(),

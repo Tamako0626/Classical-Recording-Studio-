@@ -169,7 +169,7 @@ pub fn parse_cue(text: &str, files: &[(String, String)]) -> StudioResult<(CueAlb
     }
     let mut numbers = std::collections::BTreeSet::new();
     let mut previous: BTreeMap<String, usize> = BTreeMap::new();
-    let mut rows = Vec::new();
+    let mut rows: Vec<CueTrack> = Vec::new();
     for track in tracks {
         if track.number == 0 || !numbers.insert(track.number) {
             return Err(StudioError::new("CUE 的轨号缺失或重复."));

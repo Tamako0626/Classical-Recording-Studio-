@@ -166,8 +166,8 @@ fn collect_tags(value: Option<&Value>, tags: &mut std::collections::BTreeMap<Str
     }
 }
 
-fn as_f64(value: Option<&Value>) -> Option<f64> {
-    value.and_then(|item| item.as_f64().or_else(|| item.as_str().and_then(|text| text.parse().ok())))
+fn as_f64(value: &Value) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
 pub fn run(
