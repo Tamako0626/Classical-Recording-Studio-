@@ -244,21 +244,21 @@ cmake_static() {
 
 install_zlib_msvc() {
   fetch_tar "$ZLIB_URL" "$SRC/zlib" "$SRC/zlib.ok"
-  if [ -f "$PREFIX/lib/z.lib" ] || [ -f "$PREFIX/lib/zlib.lib" ]; then
+  if [ -f "$PREFIX/lib/zlibstatic.lib" ]; then
     echo "==> reuse zlib"
   else
     echo "==> build zlib $ZLIB_TAG"
     rm -rf "$SRC/zlib/build"
     cmake_static "$SRC/zlib" "$SRC/zlib/build" -DBUILD_SHARED_LIBS=OFF
-    local static=""
-    static="$(find "$PREFIX/lib" -maxdepth 1 \( -name 'zlibstatic.lib' -o -name 'zlib.lib' -o -name 'z.lib' \) | head -n 1 || true)"
-    if [ -z "$static" ]; then
-      echo "zlib static library missing" >&2
-      exit 1
-    fi
-    cp -f "$static" "$PREFIX/lib/zlib.lib"
-    cp -f "$static" "$PREFIX/lib/z.lib"
   fi
+  if [ ! -f "$PREFIX/lib/zlibstatic.lib" ]; then
+    echo "zlib static library missing" >&2
+    exit 1
+  fi
+  # CMake also installs an import library named zlib.lib for zlib.dll.
+  rm -f "$PREFIX/lib/zlib.lib" "$PREFIX/lib/z.lib" "$PREFIX/bin/zlib.dll" "$PREFIX/bin/zlib1.dll"
+  cp -f "$PREFIX/lib/zlibstatic.lib" "$PREFIX/lib/zlib.lib"
+  cp -f "$PREFIX/lib/zlibstatic.lib" "$PREFIX/lib/z.lib"
   if [ ! -f "$PREFIX/lib/pkgconfig/zlib.pc" ]; then
     mkdir -p "$PREFIX/lib/pkgconfig"
     cat >"$PREFIX/lib/pkgconfig/zlib.pc" <<EOF
@@ -488,6 +488,11 @@ if [ "$cfg_rc" != 0 ]; then
   tail -n 160 ffbuild/config.log || true
   exit "$cfg_rc"
 fi
+# h2645_sei.o calls ff_aom_uninit_film_grain_params, but n7.1.1 only
+# compiles aom_film_grain.o for HEVC. A slim h264 parser still needs it.
+if ! grep -q 'CONFIG_H264_SEI) += aom_film_grain.o' libavcodec/Makefile; then
+  printf '\nOBJS-$(CONFIG_H264_SEI) += aom_film_grain.o\n' >> libavcodec/Makefile
+fi
 make -j"$JOBS"
 make install
 
@@ -515,7 +520,8 @@ fi
   echo "This sidecar is GPL because it is built with --enable-gpl and libx264."
   echo "The Classical Recording Studio application stays MIT and only executes these binaries."
   echo
-  echo "No upstream source was patched. Components are selected by scripts/build_ffmpeg.sh."
+  echo "Components are selected by scripts/build_ffmpeg.sh."
+  echo "The build adds aom_film_grain.o to CONFIG_H264_SEI so the h264 parser can link."
   echo "FFmpeg ${FFMPEG_TAG}  ${FFMPEG_URL}"
   echo "x264 ${X264_REF}  ${X264_URL}"
   echo "LAME ${LAME_TAG}  ${LAME_URL}"
