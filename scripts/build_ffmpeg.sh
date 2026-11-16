@@ -300,6 +300,7 @@ install_lame() {
       bitstream.c encoder.c fft.c gain_analysis.c id3tag.c lame.c newmdct.c
       presets.c psymodel.c quantize.c quantize_pvt.c reservoir.c set_get.c
       tables.c takehiro.c util.c vbrquantize.c VbrTag.c version.c
+      vector/xmm_quantize_sub.c
     )
     local file
     for file in "${sources[@]}"; do
