@@ -32,7 +32,7 @@ Windows 包由 MSVC 的 `cl` 编译, 不依赖 `msys-2.0.dll`. 第一次发应�
 
 ## 源码
 
-界面使用 [GPUI Kit](https://gpui-kit.com) 0.10. 编译在 GitHub Actions 上进行, 本仓库不要求在开发机安装 Rust 或 FFmpeg 工具链.
+界面使用 [GPUI Kit](https://gpui-kit.com) 0.10. 编译在 GitHub Actions 上进行, 本仓库不要求在开发机安装 Rust 或 FFmpeg 工具链. 纯逻辑测试先跑. 需要 FFmpeg 的测试等 sidecar 下载到 `target/sidecars` 之后再跑.
 
 - `slim ffmpeg` 在 `main` 上改到 `scripts/build_ffmpeg.sh` 时编译 sidecar.
 - `Windows` 和 `macOS` 在 `v*` 标签上编译程序, 下载 sidecar, 打成 ZIP.

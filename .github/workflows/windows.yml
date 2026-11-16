@@ -43,6 +43,32 @@ jobs:
       - name: Test
         run: cargo test --lib
 
+      - name: Test with ffmpeg
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $dir = Join-Path $env:GITHUB_WORKSPACE "target\sidecars"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          function Get-Sidecar($name, $dest) {
+            $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/$name"
+            for ($i = 1; $i -le 30; $i++) {
+              curl.exe -fsSL -o $dest $url
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $dest) -and ((Get-Item $dest).Length -gt 0)) { return }
+              Write-Host "waiting for sidecars $name ($i)"
+              Start-Sleep -Seconds 20
+            }
+            throw "missing sidecar $name"
+          }
+          Get-Sidecar "ffmpeg-windows-x64.exe" (Join-Path $dir "ffmpeg.exe")
+          Get-Sidecar "ffprobe-windows-x64.exe" (Join-Path $dir "ffprobe.exe")
+          $env:CRS_FFMPEG = Join-Path $dir "ffmpeg.exe"
+          $env:CRS_FFPROBE = Join-Path $dir "ffprobe.exe"
+          cargo test --test media -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw "media tests failed: $LASTEXITCODE" }
+
       - name: Build
         run: cargo build --profile release-max
 
@@ -70,6 +96,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "upx failed: $LASTEXITCODE" }
 
           function Get-Sidecar($name, $dest) {
+            $local = Join-Path (Join-Path $env:GITHUB_WORKSPACE "target\sidecars") (Split-Path $dest -Leaf)
+            if ((Test-Path $local) -and ((Get-Item $local).Length -gt 0)) {
+              Copy-Item $local $dest -Force
+              return
+            }
             $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/$name"
             $ok = $false
             for ($i = 1; $i -le 30; $i++) {

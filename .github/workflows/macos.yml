@@ -58,6 +58,33 @@ jobs:
         if: matrix.asset == 'macos-arm64'
         run: cargo test --lib
 
+      - name: Test with ffmpeg
+        if: matrix.asset == 'macos-arm64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dir="$GITHUB_WORKSPACE/target/sidecars"
+          mkdir -p "$dir"
+          copy_sidecar() {
+            local name="$1" dest="$2"
+            local url="https://github.com/${{ github.repository }}/releases/download/sidecars/${name}"
+            local i
+            for i in $(seq 1 30); do
+              if curl -fsSL -o "$dest" "$url" && [ -s "$dest" ]; then
+                chmod +x "$dest"
+                return 0
+              fi
+              echo "waiting for sidecars $name ($i)"
+              sleep 20
+            done
+            echo "missing sidecar $name" >&2
+            return 1
+          }
+          copy_sidecar "${{ matrix.ffmpeg }}" "$dir/ffmpeg"
+          copy_sidecar "${{ matrix.ffprobe }}" "$dir/ffprobe"
+          CRS_FFMPEG="$dir/ffmpeg" CRS_FFPROBE="$dir/ffprobe" cargo test --test media -- --test-threads=1
+
       - name: Build
         run: cargo build --profile release-max --target ${{ matrix.target }}
 
@@ -74,6 +101,11 @@ jobs:
           chmod +x "$STAGE/ClassicalRecordingStudio"
           copy_sidecar() {
             local name="$1" dest="$2"
+            if [ "${{ matrix.asset }}" = "macos-arm64" ] && [ -x "target/sidecars/$(basename "$dest")" ]; then
+              cp "target/sidecars/$(basename "$dest")" "$dest"
+              chmod +x "$dest"
+              return 0
+            fi
             local url="https://github.com/${{ github.repository }}/releases/download/sidecars/${name}"
             local i
             for i in $(seq 1 30); do
