@@ -259,6 +259,11 @@ install_zlib_msvc() {
   rm -f "$PREFIX/lib/zlib.lib" "$PREFIX/lib/z.lib" "$PREFIX/bin/zlib.dll" "$PREFIX/bin/zlib1.dll"
   cp -f "$PREFIX/lib/zlibstatic.lib" "$PREFIX/lib/zlib.lib"
   cp -f "$PREFIX/lib/zlibstatic.lib" "$PREFIX/lib/z.lib"
+  # ffmpeg's config.h defines HAVE_UNISTD_H. zconf.h then includes it, and cl has no such header.
+  if [ -f "$PREFIX/include/zconf.h" ]; then
+    sed -i 's/^#define Z_HAVE_UNISTD_H$/\/\* undef Z_HAVE_UNISTD_H \*\//' "$PREFIX/include/zconf.h"
+    sed -i '/#ifdef HAVE_UNISTD_H/i #undef HAVE_UNISTD_H' "$PREFIX/include/zconf.h"
+  fi
   if [ ! -f "$PREFIX/lib/pkgconfig/zlib.pc" ]; then
     mkdir -p "$PREFIX/lib/pkgconfig"
     cat >"$PREFIX/lib/pkgconfig/zlib.pc" <<EOF
