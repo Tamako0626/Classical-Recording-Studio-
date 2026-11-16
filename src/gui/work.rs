@@ -54,9 +54,10 @@ impl Studio {
                 RadioGroup::new("format")
                     .children(["FLAC", "WAV", "MP3", "MKV"])
                     .selected_index(format_index)
-                    .on_change(cx.listener(|this, index, _, cx| {
+                    .on_change(cx.listener(|this, index: &usize, _, cx| {
                         if let Some(project) = this.project_mut() {
-                            project.settings.format = ["FLAC", "WAV", "MP3", "MKV"][*index].to_string();
+                            let formats = ["FLAC", "WAV", "MP3", "MKV"];
+                            project.settings.format = formats[*index].to_string();
                         }
                         this.mark_dirty(cx);
                     })),

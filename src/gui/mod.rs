@@ -127,7 +127,7 @@ pub struct Studio {
 
 impl Studio {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = |placeholder: &str, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let mut input = |placeholder: &str, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let name = input("场次 / 专辑名", cx);
         let performer = input("演奏家", cx);
         let conductor = input("指挥", cx);
@@ -179,11 +179,12 @@ impl Studio {
         let cd_row_artist = input("演出者", cx);
         let cd_row_composer = input("作曲家", cx);
         let cd_row_file = input("文件名, 不含扩展名", cx);
+        let mb_query = input("曲名, 作品号", cx);
+        drop(input);
         let llm = store::load_llm();
         let llm_base = cx.new(|cx| InputState::new(window, cx).placeholder("https://api.deepseek.com").default_value(llm.base_url.clone()));
         let llm_model = cx.new(|cx| InputState::new(window, cx).placeholder("deepseek-chat").default_value(llm.model.clone()));
         let llm_key = cx.new(|cx| InputState::new(window, cx).placeholder("API Key").default_value(llm.api_key.clone()).masked(true));
-        let mb_query = input("曲名, 作品号", cx);
         let watched = [
             name.clone(),
             performer.clone(),

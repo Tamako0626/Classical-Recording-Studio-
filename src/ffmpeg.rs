@@ -144,8 +144,8 @@ fn parse_probe(text: &str) -> StudioResult<MediaInfo> {
         codec: audio.get("codec_name").and_then(Value::as_str).unwrap_or("").to_string(),
         bits: audio
             .get("bits_per_raw_sample")
-            .and_then(as_f64)
-            .or_else(|| audio.get("bits_per_sample").and_then(as_f64))
+            .and_then(|value| as_f64(Some(value)))
+            .or_else(|| as_f64(audio.get("bits_per_sample")))
             .unwrap_or(0.0) as u32,
         tags,
         attached_pic: attached,
@@ -166,8 +166,8 @@ fn collect_tags(value: Option<&Value>, tags: &mut std::collections::BTreeMap<Str
     }
 }
 
-fn as_f64(value: &Value) -> Option<f64> {
-    value.as_f64().or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+fn as_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(|item| item.as_f64().or_else(|| item.as_str().and_then(|text| text.parse().ok())))
 }
 
 pub fn run(
