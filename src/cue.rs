@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{StudioError, StudioResult};
-use crate::names::format_seconds;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueAlbum {
@@ -80,7 +79,57 @@ fn leaf(value: &str) -> String {
 }
 
 fn frame_time(frames: i64) -> String {
-    format_seconds(frames as f64 / 75.0)
+    let millis = ((frames.max(0) as f64) * 1000.0 / 75.0).round() as u64;
+    let hours = millis / 3_600_000;
+    let minutes = (millis / 60_000) % 60;
+    let secs = (millis / 1000) % 60;
+    let ms = millis % 1000;
+    format!("{hours:02}:{minutes:02}:{secs:02}.{ms:03}")
+}
+
+pub fn sort_cd_names(names: &mut [String]) {
+    names.sort_by(|left, right| cmp_cd_name(left, right));
+}
+
+pub fn cmp_cd_name(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left = left.chars().peekable();
+    let mut right = right.chars().peekable();
+    loop {
+        match (left.peek().copied(), right.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                let mut an = 0u64;
+                let mut bn = 0u64;
+                while let Some(ch) = left.peek().copied() {
+                    if !ch.is_ascii_digit() {
+                        break;
+                    }
+                    an = an.saturating_mul(10).saturating_add((ch as u8 - b'0') as u64);
+                    left.next();
+                }
+                while let Some(ch) = right.peek().copied() {
+                    if !ch.is_ascii_digit() {
+                        break;
+                    }
+                    bn = bn.saturating_mul(10).saturating_add((ch as u8 - b'0') as u64);
+                    right.next();
+                }
+                if an != bn {
+                    return an.cmp(&bn);
+                }
+            }
+            (Some(a), Some(b)) => {
+                left.next();
+                right.next();
+                let order = a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase());
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+        }
+    }
 }
 
 pub fn parse_cue(text: &str, files: &[(String, String)]) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
@@ -298,51 +347,138 @@ pub fn parse_track_list(text: &str) -> ListedTracks {
     let mut listed = ListedTracks::default();
     let mut saw_track = false;
     for raw in text.lines() {
-        let line = raw.trim().trim_start_matches(['-', '*', '#']).trim();
+        let line = nfkc_digits(&strip_markup(raw));
         if line.is_empty() {
             continue;
         }
-        if let Some((number, title)) = numbered_line(line) {
+        if let Some((number, title)) = numbered_line(&line) {
             saw_track = true;
-            if listed.numbered.contains_key(&number) {
+            if number == 0 || listed.numbered.contains_key(&number) {
                 listed.issues.push(format!("轨号 {number} 重复或无效, 请核对文字."));
                 continue;
             }
-            let (title, composer) = split_composer(&title);
+            let (title, composer) = split_composer(&strip_duration(&title));
+            if title.is_empty() {
+                continue;
+            }
             listed.numbered.insert(number, (title.clone(), composer.clone()));
             listed.ordered.push((title, composer));
             continue;
         }
-        if saw_track {
+        let Some((label, value)) = line.split_once([':', '：']) else {
+            continue;
+        };
+        let label = label.trim();
+        if saw_track && !album_label_after_tracks(label) {
             continue;
         }
-        if let Some((label, value)) = line.split_once([':', '：']) {
-            let label = label.trim();
-            let value = value.trim().trim_matches('"').trim();
-            if value.is_empty() {
-                continue;
-            }
-            let key = if label.contains("作曲") || label.eq_ignore_ascii_case("composer") {
-                "composer"
-            } else if label.contains("演出") || label.contains("演奏") || label.eq_ignore_ascii_case("artist") || label.to_ascii_lowercase().contains("performer") {
-                "artist"
-            } else if label.contains("日期") || label.contains("年份") || label.eq_ignore_ascii_case("date") || label.eq_ignore_ascii_case("year") {
-                "date"
-            } else if label.contains("专辑") || label.to_ascii_lowercase().contains("album") || label.to_ascii_lowercase().contains("title") {
-                "title"
-            } else {
-                ""
-            };
-            match key {
-                "title" if listed.album.title.is_empty() => listed.album.title = value.to_string(),
-                "artist" if listed.album.artist.is_empty() => listed.album.artist = value.to_string(),
-                "composer" if listed.album.composer.is_empty() => listed.album.composer = value.to_string(),
-                "date" if listed.album.date.is_empty() => listed.album.date = value.to_string(),
-                _ => {}
-            }
+        let value = value.trim().trim_matches(['"', '“', '”']).trim();
+        if value.is_empty() || unknown_album_value(value) {
+            continue;
+        }
+        let value = nfkc_digits(value);
+        match album_key(label) {
+            "title" if listed.album.title.is_empty() => listed.album.title = value,
+            "artist" if listed.album.artist.is_empty() => listed.album.artist = value,
+            "composer" if listed.album.composer.is_empty() => listed.album.composer = value,
+            "date" if listed.album.date.is_empty() => listed.album.date = album_date(&value),
+            _ => {}
         }
     }
     listed
+}
+
+fn strip_markup(raw: &str) -> String {
+    raw.trim().trim_start_matches(['-', '*', '•', '#']).trim().replace("**", "").replace("__", "")
+}
+
+fn nfkc_digits(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\u{ff10}'..='\u{ff19}' => char::from_u32(ch as u32 - 0xff10 + '0' as u32).unwrap_or(ch),
+            '\u{ff21}'..='\u{ff3a}' => char::from_u32(ch as u32 - 0xff21 + 'A' as u32).unwrap_or(ch),
+            '\u{ff41}'..='\u{ff5a}' => char::from_u32(ch as u32 - 0xff41 + 'a' as u32).unwrap_or(ch),
+            _ => ch,
+        })
+        .collect()
+}
+
+fn unknown_album_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "unknown" | "n/a" | "na" | "not specified" | "not provided" | "未知" | "未提供" | "不详" | "—" | "-"
+    )
+}
+
+fn album_label_after_tracks(label: &str) -> bool {
+    let lower = label.to_ascii_lowercase();
+    lower.starts_with("album ")
+        || lower.starts_with("release ")
+        || lower.starts_with("recording ")
+        || label.starts_with("专辑")
+        || label.starts_with("唱片")
+        || label.starts_with("发行")
+        || label.starts_with("录音")
+}
+
+fn album_key(label: &str) -> &'static str {
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("composer") || label.contains("作曲") {
+        "composer"
+    } else if lower.contains("artist") || lower.contains("performer") || label.contains("演出") || label.contains("演奏") || label.contains("艺术家") {
+        "artist"
+    } else if lower.contains("date") || lower.contains("year") || label.contains("日期") || label.contains("年份") || label.contains("发行年") {
+        "date"
+    } else if lower.contains("album") || lower.contains("title") || lower.contains("release") || label.contains("专辑") || label.contains("唱片") {
+        "title"
+    } else {
+        ""
+    }
+}
+
+fn album_date(value: &str) -> String {
+    let value = value.trim();
+    if let Some(head) = value.get(..10) {
+        let bytes = head.as_bytes();
+        if bytes[4] == b'-' && bytes[7] == b'-' && bytes.iter().enumerate().all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit()) {
+            return head.to_string();
+        }
+    }
+    let year: String = value.chars().take(4).collect();
+    if year.len() == 4 && year.chars().all(|ch| ch.is_ascii_digit()) && value.chars().nth(4).is_none_or(|ch| !ch.is_ascii_digit()) {
+        return year;
+    }
+    value.to_string()
+}
+
+fn strip_duration(title: &str) -> String {
+    let trimmed = title.trim();
+    let end = trimmed.strip_suffix(')').unwrap_or(trimmed);
+    let Some(space) = end.rfind(char::is_whitespace) else {
+        return trimmed.to_string();
+    };
+    let tail = end[space + 1..].trim_start_matches('(');
+    if clock_tail(tail) {
+        return end[..space].trim().to_string();
+    }
+    trimmed.to_string()
+}
+
+fn clock_tail(text: &str) -> bool {
+    let mut parts = text.split(':');
+    let Some(minutes) = parts.next() else {
+        return false;
+    };
+    let Some(seconds) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && (1..=3).contains(&minutes.len())
+        && minutes.chars().all(|ch| ch.is_ascii_digit())
+        && seconds.len() == 2
+        && seconds.chars().all(|ch| ch.is_ascii_digit())
+        && seconds.parse::<u32>().unwrap_or(99) <= 59
 }
 
 fn numbered_line(line: &str) -> Option<(u32, String)> {
@@ -384,11 +520,18 @@ fn numbered_line(line: &str) -> Option<(u32, String)> {
 }
 
 fn split_composer(title: &str) -> (String, String) {
-    if let Some((name, composer)) = title.rsplit_once(" / ") {
-        (name.trim().to_string(), composer.trim().to_string())
-    } else {
-        (title.trim().to_string(), String::new())
+    let lower = title.to_ascii_lowercase();
+    if let Some(index) = lower.rfind(" | composer:") {
+        let name = title[..index].trim();
+        let composer = title[index + " | composer:".len()..].trim();
+        if !name.is_empty() && !composer.is_empty() {
+            return (name.to_string(), composer.to_string());
+        }
     }
+    if let Some((name, composer)) = title.rsplit_once(" / ") {
+        return (name.trim().to_string(), composer.trim().to_string());
+    }
+    (title.trim().to_string(), String::new())
 }
 
 #[cfg(test)]

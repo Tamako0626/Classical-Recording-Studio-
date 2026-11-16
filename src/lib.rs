@@ -11,6 +11,8 @@ pub mod llm;
 pub mod mb;
 pub mod model;
 pub mod names;
+#[cfg(test)]
+mod parity;
 pub mod playback;
 pub mod store;
 pub mod video;

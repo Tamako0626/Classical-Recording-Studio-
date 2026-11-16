@@ -494,3 +494,25 @@ impl ProjectFile {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectImport {
+    Existing,
+    Copy,
+    New,
+}
+
+pub fn import_project(workspace: &mut Workspace, file: ProjectFile) -> ProjectImport {
+    if let Some(index) = workspace.projects.iter().position(|project| project.id == file.project.id) {
+        if workspace.projects[index] == file.project {
+            return ProjectImport::Existing;
+        }
+        let mut imported = file.project;
+        imported.id = new_id();
+        workspace.projects.push(imported);
+        return ProjectImport::Copy;
+    }
+    workspace.logs.extend(file.logs);
+    workspace.projects.push(file.project);
+    ProjectImport::New
+}

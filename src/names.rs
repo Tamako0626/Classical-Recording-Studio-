@@ -131,11 +131,7 @@ pub fn joined_end(tracks: &[Track], index: usize, join: bool) -> String {
 }
 
 pub fn session_tag_values(project: &Project) -> Tags {
-    let composer = if project.composer.chars().any(|ch| matches!(ch, '/' | '、' | ';' | '；' | '&' | '＆' | '+')) {
-        String::new()
-    } else {
-        project.composer.trim().to_string()
-    };
+    let composer = shared_composer(&project.composer);
     Tags {
         title: String::new(),
         artist: first_text(&[&project.performer, &project.conductor]),
@@ -151,6 +147,82 @@ pub fn session_tag_values(project: &Project) -> Tags {
 
 fn first_text(values: &[&str]) -> String {
     values.iter().map(|value| value.trim()).find(|value| !value.is_empty()).unwrap_or("").to_string()
+}
+
+fn shared_composer(composer: &str) -> String {
+    let trimmed = composer.trim();
+    if trimmed.chars().any(|ch| matches!(ch, '/' | '、' | ';' | '；')) {
+        return String::new();
+    }
+    if trimmed.split_whitespace().any(|part| matches!(part, "&" | "＆" | "+")) {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
+pub struct TagChange {
+    pub key: &'static str,
+    pub before: String,
+    pub after: String,
+}
+
+pub struct SessionTagBatch {
+    pub updates: Vec<(String, Vec<TagChange>)>,
+    pub matched: usize,
+    pub has_session: bool,
+}
+
+pub fn batch_session_tags(project: &Project) -> SessionTagBatch {
+    let mut shared = session_tag_values(project);
+    if shared.artist.trim().is_empty() {
+        shared.artist = project.orchestra.trim().to_string();
+    }
+    let keys = ["Artist", "Album", "Date", "Composer", "Conductor", "Soloist", "Orchestra"];
+    let has_session = keys.iter().any(|key| !shared.get(key).trim().is_empty());
+    let mut updates = Vec::new();
+    let mut matched = 0;
+    if !has_session {
+        return SessionTagBatch { updates, matched, has_session };
+    }
+    for (index, track) in project.tracks.iter().enumerate() {
+        let blank = track.source.trim().is_empty()
+            && track.filename.trim().is_empty()
+            && track.end.trim().is_empty()
+            && (track.start.trim().is_empty() || track.start.trim() == "00:00")
+            && TAG_KEYS.iter().all(|key| track.tags.get(key).trim().is_empty());
+        if blank {
+            continue;
+        }
+        matched += 1;
+        let mut fields = Vec::new();
+        for key in ["Artist", "Album", "Date", "Composer", "Conductor", "Soloist", "Orchestra", "Track"] {
+            let after = if key == "Track" { format!("{:02}", index + 1) } else { shared.get(key).trim().to_string() };
+            let before = track.tags.get(key).to_string();
+            if after.is_empty() || after == before.trim() {
+                continue;
+            }
+            if matches!(key, "Track" | "Composer") && !before.trim().is_empty() {
+                continue;
+            }
+            fields.push(TagChange { key, before, after });
+        }
+        if !fields.is_empty() {
+            updates.push((track.id.clone(), fields));
+        }
+    }
+    SessionTagBatch { updates, matched, has_session }
+}
+
+pub fn apply_session_tags(project: &mut Project) -> SessionTagBatch {
+    let batch = batch_session_tags(project);
+    for (id, fields) in &batch.updates {
+        if let Some(track) = project.tracks.iter_mut().find(|track| &track.id == id) {
+            for field in fields {
+                track.tags.set(field.key, field.after.clone());
+            }
+        }
+    }
+    batch
 }
 
 pub fn track_tags(project: &Project, track: &Track, index: usize) -> Tags {

@@ -20,7 +20,7 @@ use crate::ffmpeg;
 use crate::llm::{self, LlmConfig};
 use crate::mb;
 use crate::model::{self, Project, Settings, Track, TAG_KEYS};
-use crate::names::{self, session_tag_values};
+use crate::names;
 use crate::video::{self, VideoMode};
 
 use super::{set_text, text, JobMsg, Studio};
@@ -409,7 +409,7 @@ impl Studio {
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(Button::new("save-llm").label("保存配置").on_click(cx.listener(|this, _, _, cx| this.save_llm(cx))))
+                    .child(Button::new("save-llm").label("保存配置").on_click(cx.listener(|this, _, window, cx| this.save_llm(window, cx))))
                     .child(Button::new("list-models").label("读取模型").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.list_models(cx))))
                     .child(Button::new("english").primary().label("生成英文场次").loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))
                     .child(Button::new("apply-english").label("应用选中项").on_click(cx.listener(|this, _, window, cx| this.apply_english(window, cx)))),
@@ -534,18 +534,7 @@ impl Studio {
         let Some(project) = self.project_mut() else {
             return;
         };
-        let session = session_tag_values(project);
-        for (index, track) in project.tracks.iter_mut().enumerate() {
-            for key in TAG_KEYS {
-                if !track.tags.get(key).trim().is_empty() || key == "Title" {
-                    continue;
-                }
-                let value = if key == "Track" { format!("{:02}", index + 1) } else { session.get(key).to_string() };
-                if !value.is_empty() {
-                    track.tags.set(key, value);
-                }
-            }
-        }
+        names::apply_session_tags(project);
         self.push_track(window, cx);
         self.mark_dirty(cx);
     }
@@ -800,6 +789,7 @@ impl Studio {
                 self.cd_files.push((name, file.display().to_string()));
             }
         }
+        self.cd_files.sort_by(|left, right| cue::cmp_cd_name(&left.0, &right.0));
         if let Some(path) = cue_path {
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
@@ -1083,8 +1073,13 @@ impl Studio {
         self.mark_dirty(cx);
     }
 
-    fn save_llm(&mut self, cx: &mut Context<Self>) {
-        self.llm = read_llm(self, cx);
+    fn save_llm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let previous = self.llm.clone();
+        let next = read_llm(self, cx);
+        self.llm = llm::config_after_endpoint_change(&previous, next);
+        if self.llm.api_key.is_empty() {
+            set_text(&self.llm_key, "", window, cx);
+        }
         match crate::store::save_llm(&self.llm) {
             Ok(()) => self.status = "已保存模型配置.".into(),
             Err(error) => self.show_error(error.to_string(), cx),
@@ -1096,7 +1091,7 @@ impl Studio {
         if self.busy {
             return;
         }
-        let config = read_llm(self, cx);
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         self.spawn_job(cx, move || match llm::list_models(&config) {
             Ok(names) => JobMsg::Done { operation: "读取模型", result: Ok(names.join(", ")) },
             Err(error) => JobMsg::Done { operation: "读取模型", result: Err(error.to_string()) },
@@ -1108,7 +1103,7 @@ impl Studio {
         if self.busy {
             return;
         }
-        let config = read_llm(self, cx);
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         let Some(project) = self.project().cloned() else {
             self.show_error("请先建立项目.", cx);
             return;

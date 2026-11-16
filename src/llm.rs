@@ -47,10 +47,47 @@ fn models_url(base: &str) -> String {
     format!("{base}/models")
 }
 
+pub fn remote_base_allowed(base: &str) -> StudioResult<()> {
+    let lower = base.trim().to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = lower.strip_prefix("http://") {
+        let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
+        if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+            return Ok(());
+        }
+        return Err(StudioError::new("远程模型地址必须使用 HTTPS."));
+    }
+    Err(StudioError::new("模型地址须以 http:// 或 https:// 开头."))
+}
+
+pub fn config_after_endpoint_change(previous: &LlmConfig, mut next: LlmConfig) -> LlmConfig {
+    let canonical = |base: &str| base.trim().trim_end_matches('/').to_ascii_lowercase();
+    if canonical(&previous.base_url) != canonical(&next.base_url) {
+        next.api_key.clear();
+    }
+    next
+}
+
+pub fn model_ids(json: &Value) -> StudioResult<Vec<String>> {
+    let mut names = json["data"]
+        .as_array()
+        .map(|items| items.iter().filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Err(StudioError::new("模型列表是空的."));
+    }
+    Ok(names)
+}
+
 pub fn chat(config: &LlmConfig, system: &str, user: &str) -> StudioResult<String> {
     if config.api_key.trim().is_empty() {
         return Err(StudioError::new("请先填写 API Key."));
     }
+    remote_base_allowed(&config.base_url)?;
     if config.model.trim().is_empty() {
         return Err(StudioError::new("请先填写模型 ID."));
     }
@@ -80,27 +117,14 @@ pub fn list_models(config: &LlmConfig) -> StudioResult<Vec<String>> {
     if config.api_key.trim().is_empty() {
         return Err(StudioError::new("请先填写 API Key."));
     }
+    remote_base_allowed(&config.base_url)?;
     let response = ureq::get(&models_url(&config.base_url))
         .set("Authorization", &format!("Bearer {}", config.api_key.trim()))
         .set("Accept", "application/json")
         .call()
         .map_err(|error| StudioError::new(format!("无法读取模型列表: {error}")))?;
     let json: Value = response.into_json().map_err(|error| StudioError::new(error.to_string()))?;
-    let mut names = json["data"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names.dedup();
-    if names.is_empty() {
-        return Err(StudioError::new("模型列表是空的."));
-    }
-    Ok(names)
+    model_ids(&json)
 }
 
 #[derive(Clone, Debug)]
@@ -137,16 +161,23 @@ pub fn suggest_english(config: &LlmConfig, project: &Project) -> StudioResult<Ve
     });
     let system = "You rewrite classical concert session fields into English for album tags and folder names. Keep proper names accurate. Do not invent a date. Return JSON only, with the same keys. Each value is an object {\"value\":\"...\",\"note\":\"...\"}. Leave value empty when the source is empty.";
     let raw = chat(config, system, &payload.to_string())?;
-    let json = extract_json(&raw)?;
+    interpret_english(&raw, project)
+}
+
+pub fn interpret_english(raw: &str, project: &Project) -> StudioResult<Vec<EnglishSuggestion>> {
+    let json = extract_json(raw)?;
+    let nested = json.get("fields").cloned();
+    let root = nested.as_ref().filter(|value| value.is_object()).unwrap_or(&json);
     let mut suggestions = Vec::new();
     for (key, label) in FIELDS {
         let before = field_value(project, key);
         if before.trim().is_empty() {
             continue;
         }
-        let item = &json[key];
-        let after = item.get("value").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let note = item.get("note").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let item = &root[key];
+        let after_raw = item.get("value").and_then(Value::as_str).unwrap_or("").trim();
+        let after = if english_text(after_raw) { after_raw.to_string() } else { String::new() };
+        let note = item.get("note").and_then(Value::as_str).unwrap_or("").trim().chars().take(280).collect::<String>();
         if after.is_empty() && note.is_empty() {
             continue;
         }
@@ -160,6 +191,23 @@ pub fn suggest_english(config: &LlmConfig, project: &Project) -> StudioResult<Ve
         });
     }
     Ok(suggestions)
+}
+
+fn english_text(value: &str) -> bool {
+    if value.is_empty() || value.chars().count() > 280 || value.chars().any(|ch| ch.is_control()) {
+        return false;
+    }
+    let mut letters = 0;
+    for ch in value.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        letters += 1;
+        if matches!(ch, '\u{3400}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{3040}'..='\u{30ff}' | '\u{ac00}'..='\u{d7af}') {
+            return false;
+        }
+    }
+    letters > 0
 }
 
 fn field_value(project: &Project, key: &str) -> String {

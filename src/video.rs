@@ -135,13 +135,7 @@ pub fn make_cover_videos(
             ffmpeg::run(&binaries.ffmpeg, &args, true, None, cancel)?;
             let output = ffmpeg::probe(binaries, &staged, cancel)?;
             let duration = output.duration.ok_or_else(|| StudioError::new("成品没有时长."))?;
-            if (duration - audio_len).abs() > 0.25
-                || output.codec != plan.codec
-                || output.rate != plan.rate
-                || output.video_codec != "h264"
-                || output.width != 1920
-                || output.height != 1080
-            {
+            if (duration - audio_len).abs() > 0.25 || output.codec != plan.codec || output.rate != plan.rate || !cover_frame_accepted(&output) {
                 return Err(StudioError::new("成品的画面, 音频格式或时长未通过检查."));
             }
             if plan.ext == "mkv" && output.bits < plan.min_bits && plan.codec != "flac" {
@@ -158,6 +152,15 @@ pub fn make_cover_videos(
     }
     let _ = fs::remove_dir_all(&scratch);
     Ok(results)
+}
+
+pub fn cover_frame_accepted(info: &MediaInfo) -> bool {
+    info.video_codec == "h264" && info.width == 1920 && info.height == 1080
+}
+
+pub fn cover_audio_choice(info: &MediaInfo, mode: VideoMode) -> StudioResult<(&'static str, String, u32)> {
+    let plan = audio_plan(info, mode)?;
+    Ok((plan.ext, plan.codec, plan.rate))
 }
 
 fn audio_plan(info: &MediaInfo, mode: VideoMode) -> StudioResult<AudioPlan> {

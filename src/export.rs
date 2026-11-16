@@ -346,7 +346,7 @@ fn export_one(binaries: &Binaries, plan: &Plan, job: &Job, folder: &Path, cancel
     Ok(destination)
 }
 
-fn verify_output(info: &MediaInfo, plan: &Plan, job: &Job, span: Option<f64>) -> StudioResult<()> {
+pub(crate) fn verify_output(info: &MediaInfo, plan: &Plan, job: &Job, span: Option<f64>) -> StudioResult<()> {
     let Some(duration) = info.duration else {
         return Err(StudioError::new("质量检查失败: 没有时长."));
     };
@@ -424,7 +424,7 @@ fn publish_new(source: &Path, destination: &Path) -> StudioResult<()> {
     Ok(())
 }
 
-fn archive_artwork(folder: &Path, source: Option<&Path>, back: bool) -> StudioResult<()> {
+pub(crate) fn archive_artwork(folder: &Path, source: Option<&Path>, back: bool) -> StudioResult<()> {
     let Some(source) = source else {
         return Ok(());
     };

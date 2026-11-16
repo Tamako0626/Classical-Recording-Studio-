@@ -51,8 +51,6 @@ impl Cancel {
 }
 
 pub fn locate() -> StudioResult<Binaries> {
-    let ffmpeg_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-    let probe_name = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -61,6 +59,12 @@ pub fn locate() -> StudioResult<Binaries> {
         }
     }
     dirs.push(PathBuf::from("vendor"));
+    locate_in(&dirs)
+}
+
+pub(crate) fn locate_in(dirs: &[PathBuf]) -> StudioResult<Binaries> {
+    let ffmpeg_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let probe_name = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
     for dir in dirs {
         let ffmpeg = dir.join(ffmpeg_name);
         let ffprobe = dir.join(probe_name);
@@ -107,7 +111,7 @@ pub fn probe(binaries: &Binaries, path: &Path, cancel: &Cancel) -> StudioResult<
     parse_probe(&output)
 }
 
-fn parse_probe(text: &str) -> StudioResult<MediaInfo> {
+pub(crate) fn parse_probe(text: &str) -> StudioResult<MediaInfo> {
     let json: Value = serde_json::from_str(text).map_err(|error| StudioError::new(format!("无法读取音频信息: {error}")))?;
     let streams = json.get("streams").and_then(Value::as_array);
     let audio = streams

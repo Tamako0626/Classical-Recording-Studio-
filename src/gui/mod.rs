@@ -770,20 +770,16 @@ impl Studio {
                 return;
             }
         };
-        if let Some(index) = self.workspace.projects.iter().position(|project| project.id == file.project.id) {
-            if self.workspace.projects[index] == file.project {
+        let source_id = file.project.id.clone();
+        match crate::model::import_project(&mut self.workspace, file) {
+            crate::model::ProjectImport::Existing => {
+                let index = self.workspace.projects.iter().position(|project| project.id == source_id).unwrap_or(0);
                 self.select_project(index, window, cx);
                 self.status = "已打开现有项目.".into();
                 return;
             }
-            let mut imported = file.project;
-            imported.id = crate::model::new_id();
-            self.workspace.projects.push(imported);
-            self.status = "已作为副本打开项目文件.".into();
-        } else {
-            self.workspace.projects.push(file.project);
-            self.workspace.logs.extend(file.logs);
-            self.status = "已打开项目文件.".into();
+            crate::model::ProjectImport::Copy => self.status = "已作为副本打开项目文件.".into(),
+            crate::model::ProjectImport::New => self.status = "已打开项目文件.".into(),
         }
         self.project_index = Some(self.workspace.projects.len() - 1);
         self.track_index = Some(0);
