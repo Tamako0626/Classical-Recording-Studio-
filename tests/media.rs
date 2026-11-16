@@ -98,7 +98,7 @@ fn probe(bins: &Binaries, path: &Path) -> MediaInfo {
 }
 
 fn decode_s16(bins: &Binaries, input: &Path, scratch: &Scratch) -> Vec<i16> {
-    let output = scratch.path(format!("pcm-{}.wav", input.file_stem().unwrap_or_default().to_string_lossy()));
+    let output = scratch.path(&format!("pcm-{}.wav", input.file_stem().unwrap_or_default().to_string_lossy()));
     encode(bins, &["-i", &input.display().to_string(), "-map", "0:a:0", "-c:a", "pcm_s16le"], &output);
     let bytes = fs::read(&output).unwrap();
     let data = bytes.windows(4).position(|mark| mark == b"data").expect("wav data");
