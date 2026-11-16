@@ -1,0 +1,40 @@
+name: macOS desktop
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: brew install ffmpeg
+      - run: npm test
+      - run: npm run dist:mac
+      - name: Verify native bundle starts
+        run: |
+          executable=""
+          architecture="$(uname -m)"
+          while IFS= read -r -d '' bundle; do
+            name="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$bundle/Contents/Info.plist")"
+            candidate="$bundle/Contents/MacOS/$name"
+            if file "$candidate" | grep -q "$architecture"; then
+              executable="$candidate"
+              break
+            fi
+          done < <(find release -maxdepth 2 -name '*.app' -print0)
+          test -n "$executable"
+          export STUDIO_STARTUP_CHECK_DIR="$(mktemp -d)"
+          "$executable" --startup-check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Classical-Recording-Studio-macOS
+          path: release/*-macOS-*.zip
+          if-no-files-found: error
