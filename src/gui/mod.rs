@@ -1224,10 +1224,10 @@ impl Studio {
             let label = value.clone();
             chips = if picked {
                 let chosen = value.clone();
-                chips.child(Button::new(SharedString::from(format!("filter-{key}-{index}"))).xsmall().primary().label(label.clone()).on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, chosen, cx))))
+                chips.child(Button::new(SharedString::from(format!("filter-{key}-{index}"))).xsmall().primary().label(label.clone()).on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, chosen.clone(), cx))))
             } else {
                 let chosen = value;
-                chips.child(Button::new(SharedString::from(format!("filter-{key}-{index}"))).xsmall().ghost().label(label).on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, chosen, cx))))
+                chips.child(Button::new(SharedString::from(format!("filter-{key}-{index}"))).xsmall().ghost().label(label).on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, chosen.clone(), cx))))
             };
         }
         div().flex().flex_col().gap_1().child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(title)).child(chips)
