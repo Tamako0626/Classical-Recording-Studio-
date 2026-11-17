@@ -261,7 +261,9 @@ impl Studio {
                     .child(Button::new("fill-tags").small().label("补齐空白标签").on_click(cx.listener(|this, _, window, cx| this.fill_tags(window, cx))))
                     .child(Button::new("apply-names").small().label("按规则填写空文件名").on_click(cx.listener(|this, _, window, cx| this.apply_names(window, cx))))
                     .child(Button::new("local-work").small().label("采用本地英文曲名").on_click(cx.listener(|this, _, window, cx| this.apply_catalog(window, cx))))
-                    .child(Button::new("merge-tracks").small().label("合并所选为一轨").disabled(self.track_picks.len() < 2).on_click(cx.listener(|this, _, window, cx| this.merge_selected(window, cx))))
+                    .child(Button::new("merge-tracks").small().label("合并所选为一轨").disabled(self.track_picks.len() < 2).on_click(cx.listener(|this, _, window, cx| {
+                        this.merge_selected(window, cx);
+                    })))
                     .child(Button::new("split-merged").small().label("拆回乐章").on_click(cx.listener(|this, _, window, cx| this.split_merged(window, cx))))
                     .child(Button::new("merge-groups").small().label("合并建议的乐章").on_click(cx.listener(|this, _, window, cx| this.merge_groups(window, cx))))
                     .child(Button::new("cycle-status").small().label(format!("状态: {}", project.status)).on_click(cx.listener(|this, _, _, cx| this.cycle_status(cx)))),

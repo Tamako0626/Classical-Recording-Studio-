@@ -114,7 +114,7 @@ pub fn prepare(project: &Project) -> StudioResult<Plan> {
                 blank.source = source_name.clone();
                 blank
             });
-            let base = filename_for(rule, &dummy, &tags, index);
+            let base = filename_for(&rule, &dummy, &tags, index);
             let target = format!("{base}.{}", settings.format.to_lowercase());
             if base.is_empty() || !output_filename_valid(&target) {
                 return Err(StudioError::new(format!("第 {} 个文件的输出文件名无效.", index + 1)));
@@ -600,12 +600,12 @@ fn watch_progress(progress: &async_channel::Sender<String>, label: &str, span: O
     let Some(span) = span.filter(|value| *value > 0.2) else {
         return (None, None);
     };
-    let (sender, receiver) = async_channel::unbounded();
+    let (sender, receiver) = async_channel::unbounded::<f64>();
     let progress = progress.clone();
     let label = label.to_string();
     let handle = std::thread::spawn(move || {
         while let Ok(seconds) = receiver.recv_blocking() {
-            let percent = (seconds / span * 100.0).clamp(0.0, 99.0);
+            let percent = (seconds / span * 100.0).clamp(0.0_f64, 99.0_f64);
             let _ = progress.try_send(format!("{label}  {percent:.0}%"));
         }
     });
