@@ -188,7 +188,7 @@ impl Studio {
         let notes = input("备注", cx);
         let start = input("00:00", cx);
         let end = input("自动", cx);
-        let filename = input("输出文件名（不含扩展名）", cx);
+        let filename = input("留空时按命名规则生成", cx);
         let gain = input("0", cx);
         let width = input("100", cx);
         let reverb = input("0", cx);
