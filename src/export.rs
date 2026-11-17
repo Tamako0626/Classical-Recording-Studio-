@@ -7,8 +7,15 @@ use std::path::{Path, PathBuf};
 use crate::effects::filter_chain;
 use crate::error::{StudioError, StudioResult};
 use crate::ffmpeg::{self, Binaries, Cancel, MediaInfo};
-use crate::model::{Project, Settings, Tags, TAG_KEYS};
+use crate::model::{Project, Segment, Settings, Tags, TAG_KEYS};
 use crate::names::{self, album_folder_name, filename_for, joined_end, output_filename_valid, track_tags};
+
+#[derive(Clone, Debug)]
+pub struct SpanCut {
+    pub source: PathBuf,
+    pub start: f64,
+    pub end: Option<f64>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -19,6 +26,8 @@ pub struct Job {
     pub start: f64,
     pub end: Option<f64>,
     pub tags: Tags,
+    pub disc: u32,
+    pub segments: Vec<SpanCut>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,11 +62,7 @@ pub fn prepare(project: &Project) -> StudioResult<Plan> {
     }
     let cover = optional_cover(&project.cover_path, &project.cover_file, settings.cover && settings.format != "MKV")?;
     let back_cover = optional_cover(&project.back_cover_path, &project.back_cover_file, false)?;
-    let rule = if project.naming_rule.trim().is_empty() {
-        names::DEFAULT_NAMING
-    } else {
-        project.naming_rule.trim()
-    };
+    let rule = names::effective_naming(project);
     let mut jobs = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     if settings.split {
@@ -65,35 +70,35 @@ pub fn prepare(project: &Project) -> StudioResult<Plan> {
             return Err(StudioError::new("请至少添加一条曲目."));
         }
         for (index, track) in project.tracks.iter().enumerate() {
-            let end_text = joined_end(&project.tracks, index, project.auto_join);
-            let start = names::time_seconds(&track.start)?.unwrap_or(0.0);
-            let end = names::time_seconds(&end_text)?;
-            if let Some(end) = end {
-                if end <= start {
-                    return Err(StudioError::new(format!("第 {} 轨的结束须晚于开始.", index + 1)));
-                }
-            }
-            let source = resolve_source(project, &track.source)?;
+            let segments = cuts_for(project, track, index)?;
             let tags = track_tags(project, track, index);
             if settings.metadata && tags.title.trim().is_empty() {
                 return Err(StudioError::new(format!("第 {} 轨缺少 Title.", index + 1)));
             }
-            let base = filename_for(rule, track, &tags, index);
-            let target = format!("{base}.{}", settings.format.to_lowercase());
-            if base.is_empty() || !output_filename_valid(&target) {
+            let base = filename_for(&rule, track, &tags, index);
+            let leaf = format!("{base}.{}", settings.format.to_lowercase());
+            if base.is_empty() || !output_filename_valid(&leaf) {
                 return Err(StudioError::new(format!("第 {} 轨的输出文件名无效或过长.", index + 1)));
             }
+            let target = if project.disc_folders && track.disc > 0 {
+                format!("Disc {:02}/{leaf}", track.disc)
+            } else {
+                leaf
+            };
             if !seen.insert(target.to_lowercase()) {
                 return Err(StudioError::new(format!("输出文件名重复: {target}")));
             }
+            let first = segments.first().cloned();
             jobs.push(Job {
                 order: index + 1,
-                source,
+                source: first.as_ref().map(|cut| cut.source.clone()).unwrap_or_default(),
                 source_name: track.source.clone(),
                 target,
-                start,
-                end,
+                start: first.as_ref().map(|cut| cut.start).unwrap_or(0.0),
+                end: first.as_ref().and_then(|cut| cut.end),
                 tags,
+                disc: track.disc,
+                segments,
             });
         }
     } else {
@@ -125,6 +130,8 @@ pub fn prepare(project: &Project) -> StudioResult<Plan> {
                 start: 0.0,
                 end: None,
                 tags,
+                disc: 0,
+                segments: Vec::new(),
             });
         }
     }
@@ -137,6 +144,50 @@ pub fn prepare(project: &Project) -> StudioResult<Plan> {
         back_cover,
         note,
     })
+}
+
+fn cuts_for(project: &Project, track: &crate::model::Track, index: usize) -> StudioResult<Vec<SpanCut>> {
+    let raw = if track.parts.is_empty() {
+        vec![Segment {
+            source: track.source.clone(),
+            start: track.start.clone(),
+            end: joined_end(&project.tracks, index, project.auto_join),
+            title: String::new(),
+        }]
+    } else {
+        track.parts.clone()
+    };
+    if raw.is_empty() {
+        return Err(StudioError::new(format!("第 {} 轨没有片段.", index + 1)));
+    }
+    let mut cuts = Vec::new();
+    for (part_index, part) in raw.iter().enumerate() {
+        let source = resolve_source(project, &part.source)?;
+        let start = names::time_seconds(&part.start)?.unwrap_or(0.0);
+        let end = names::time_seconds(&part.end)?;
+        if let Some(end) = end {
+            if end <= start {
+                return Err(StudioError::new(format!("第 {} 轨的结束须晚于开始.", index + 1)));
+            }
+        } else if part_index + 1 != raw.len() {
+            return Err(StudioError::new(format!("第 {} 轨的中间片段缺少终点.", index + 1)));
+        }
+        cuts.push(SpanCut { source, start, end });
+    }
+    Ok(collapse_cuts(cuts))
+}
+
+fn collapse_cuts(cuts: Vec<SpanCut>) -> Vec<SpanCut> {
+    let mut out = Vec::new();
+    for cut in cuts {
+        let join = out.last().is_some_and(|last: &SpanCut| last.source == cut.source && last.end.is_some_and(|end| (end - cut.start).abs() <= 0.05));
+        if join {
+            out.last_mut().unwrap().end = cut.end;
+        } else {
+            out.push(cut);
+        }
+    }
+    out
 }
 
 fn optional_cover(path: &str, name: &str, required_decode: bool) -> StudioResult<Option<PathBuf>> {
@@ -166,8 +217,7 @@ pub fn resolve_source(project: &Project, name: &str) -> StudioResult<PathBuf> {
         return Err(StudioError::new("有曲目还没有选择录音."));
     }
     if let Some(path) = project.source_paths.get(name) {
-        let file = PathBuf::from(path);
-        if file.is_file() {
+        if let Some(file) = existing_source(project, path) {
             return Ok(file);
         }
     }
@@ -178,11 +228,93 @@ pub fn resolve_source(project: &Project, name: &str) -> StudioResult<PathBuf> {
     Err(StudioError::new(format!("找不到录音 {name}. 请重新关联.")))
 }
 
+fn existing_source(project: &Project, path: &str) -> Option<PathBuf> {
+    let file = PathBuf::from(path);
+    if file.is_file() {
+        return Some(file);
+    }
+    if project.source_root.trim().is_empty() {
+        return None;
+    }
+    let joined = PathBuf::from(&project.source_root).join(file);
+    joined.is_file().then_some(joined)
+}
+
+pub fn describe_plan(plan: &Plan) -> String {
+    let concat = plan.jobs.iter().filter(|job| job.segments.len() > 1).count();
+    let mut lines = vec![format!("将导出 {} 个文件到 {}.", plan.jobs.len(), plan.folder_name)];
+    if concat > 0 {
+        lines.push(format!("{concat} 条由多段拼接, 段与段之间的空隙不会保留."));
+    }
+    for job in plan.jobs.iter().take(12) {
+        let kind = if job.segments.len() > 1 {
+            format!("拼接 {} 段", job.segments.len())
+        } else {
+            "单段".into()
+        };
+        lines.push(format!("{}  {kind}", job.target));
+    }
+    if plan.jobs.len() > 12 {
+        lines.push(format!("其余 {} 个文件略.", plan.jobs.len() - 12));
+    }
+    lines.join("\n")
+}
+
+pub fn relink_directory(project: &mut Project, root: &Path) -> StudioResult<usize> {
+    if !root.is_dir() {
+        return Err(StudioError::new("请选择一个已有的文件夹."));
+    }
+    let mut by_leaf: std::collections::BTreeMap<String, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(name) = path.file_name().map(|item| item.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if names::audio_name(&name) {
+                by_leaf.entry(name.to_lowercase()).or_default().push(path);
+            }
+        }
+    }
+    let mut linked = 0usize;
+    for source in project.sources.clone() {
+        let leaf = names::source_leaf(&source).to_lowercase();
+        let Some(paths) = by_leaf.get(&leaf) else {
+            continue;
+        };
+        if paths.len() != 1 {
+            continue;
+        }
+        let text = stored_path(project, &paths[0]);
+        project.source_paths.insert(source, text);
+        linked += 1;
+    }
+    Ok(linked)
+}
+
+fn stored_path(project: &Project, path: &Path) -> String {
+    if !project.source_root.trim().is_empty() {
+        if let Ok(relative) = path.strip_prefix(&project.source_root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+    }
+    path.display().to_string()
+}
+
 #[derive(Clone, Debug)]
 pub struct TrackReport {
     pub target: String,
     pub path: Option<PathBuf>,
     pub error: Option<String>,
+    pub skipped: bool,
 }
 
 pub fn export_album(
@@ -207,11 +339,12 @@ pub fn export_album(
             break;
         }
         let _ = progress.try_send(format!("{}/{}  {}", index + 1, plan.jobs.len(), job.target));
-        match export_one(binaries, plan, job, &folder, cancel) {
-            Ok(path) => reports.push(TrackReport {
+        match export_one(binaries, plan, job, &folder, cancel, progress, index, plan.jobs.len()) {
+            Ok(made) => reports.push(TrackReport {
                 target: job.target.clone(),
-                path: Some(path),
+                path: Some(made.path),
                 error: None,
+                skipped: made.skipped,
             }),
             Err(error) => {
                 if cancel.is_cancelled() {
@@ -221,6 +354,7 @@ pub fn export_album(
                     target: job.target.clone(),
                     path: None,
                     error: Some(error.to_string()),
+                    skipped: false,
                 });
             }
         }
@@ -228,20 +362,39 @@ pub fn export_album(
     Ok(reports)
 }
 
-fn export_one(binaries: &Binaries, plan: &Plan, job: &Job, folder: &Path, cancel: &Cancel) -> StudioResult<PathBuf> {
+struct Made {
+    path: PathBuf,
+    skipped: bool,
+}
+
+fn export_one(
+    binaries: &Binaries,
+    plan: &Plan,
+    job: &Job,
+    folder: &Path,
+    cancel: &Cancel,
+    progress: &async_channel::Sender<String>,
+    index: usize,
+    total: usize,
+) -> StudioResult<Made> {
     let destination = folder.join(&job.target);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let cuts = job_cuts(job);
+    let span = span_of(binaries, &cuts, cancel)?;
     if destination.exists() {
-        return Err(StudioError::new(format!("输出目录已有同名文件: {}", job.target)));
+        let existing = ffmpeg::probe(binaries, &destination, cancel)?;
+        return if verify_output(&existing, plan, job, span).is_ok() {
+            Ok(Made { path: destination, skipped: true })
+        } else {
+            Err(StudioError::new(format!("输出目录已有同名文件, 且与本次导出不一致: {}", job.target)))
+        };
     }
-    let media = ffmpeg::probe(binaries, &job.source, cancel)?;
-    if let Some(duration) = media.duration {
-        if job.start >= duration || job.end.is_some_and(|end| end > duration + 0.05) {
-            return Err(StudioError::new("起止点超出录音时长."));
-        }
-    }
-    let span = job.end.map(|end| end - job.start).or_else(|| media.duration.map(|duration| duration - job.start));
-    let filters = filter_chain(&plan.settings, span, media.channels)?;
     let scratch = tempfile_dir(folder)?;
+    let _clean = CleanDir(scratch.clone());
+    let (input, start, end, channels) = stage_cuts(binaries, &cuts, folder, cancel)?;
+    let filters = filter_chain(&plan.settings, span, channels)?;
     let staged = scratch.join(format!("track{}", extension(&job.target)));
     let mut args = vec![
         "-hide_banner".into(),
@@ -254,19 +407,24 @@ fn export_one(binaries: &Binaries, plan: &Plan, job: &Job, folder: &Path, cancel
         "pipe:1".into(),
         "-nostats".into(),
         "-ss".into(),
-        format!("{}", job.start),
+        format!("{start}"),
         "-i".into(),
-        job.source.display().to_string(),
+        input.display().to_string(),
     ];
-    let image_input = plan.format != "MKV" && plan.settings.cover && plan.cover.is_some();
-    if image_input {
+    let front = plan.format != "MKV" && plan.settings.cover && plan.cover.is_some();
+    let back = plan.format != "MKV" && plan.settings.embed_back && plan.back_cover.is_some();
+    if front {
         args.push("-i".into());
         args.push(plan.cover.as_ref().unwrap().display().to_string());
     }
+    if back {
+        args.push("-i".into());
+        args.push(plan.back_cover.as_ref().unwrap().display().to_string());
+    }
     args.extend(["-map".into(), "0:a:0".into(), "-map_chapters".into(), "-1".into(), "-map_metadata".into(), "-1".into()]);
-    if let Some(end) = job.end {
+    if let Some(end) = end {
         args.push("-t".into());
-        args.push(format!("{}", end - job.start));
+        args.push(format!("{}", end - start));
     }
     if plan.settings.metadata {
         for key in TAG_KEYS {
@@ -284,7 +442,7 @@ fn export_one(binaries: &Binaries, plan: &Plan, job: &Job, folder: &Path, cancel
     args.push("-ar".into());
     args.push(plan.settings.rate.to_string());
     args.extend(encoder_args(&plan.format));
-    if image_input {
+    if front {
         args.extend([
             "-map".into(),
             "1:v:0".into(),
@@ -298,28 +456,35 @@ fn export_one(binaries: &Binaries, plan: &Plan, job: &Job, folder: &Path, cancel
             "comment=Cover (front)".into(),
         ]);
     }
+    if back {
+        let stream = if front { "2:v:0" } else { "1:v:0" };
+        let index = if front { 1 } else { 0 };
+        args.extend([
+            "-map".into(),
+            stream.into(),
+            "-c:v".into(),
+            "copy".into(),
+            format!("-disposition:v:{index}"),
+            "attached_pic".into(),
+            format!("-metadata:s:v:{index}"),
+            "title=Album cover".into(),
+            format!("-metadata:s:v:{index}"),
+            "comment=Cover (back)".into(),
+        ]);
+    }
     if plan.format == "MKV" {
-        if let Some(cover) = &plan.cover {
-            if plan.settings.cover {
-                let mime = if cover.extension().and_then(|ext| ext.to_str()).unwrap_or("").eq_ignore_ascii_case("png") {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                };
-                let filename = cover.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| "cover.jpg".into());
-                args.extend([
-                    "-attach".into(),
-                    cover.display().to_string(),
-                    "-metadata:s:t:0".into(),
-                    format!("mimetype={mime}"),
-                    "-metadata:s:t:0".into(),
-                    format!("filename={filename}"),
-                ]);
-            }
-        }
+        attach_mkv(&mut args, plan.cover.as_deref(), plan.settings.cover, 0);
+        let back_index = usize::from(plan.settings.cover && plan.cover.is_some());
+        attach_mkv(&mut args, plan.back_cover.as_deref(), plan.settings.embed_back, back_index);
     }
     args.push(staged.display().to_string());
-    ffmpeg::run(&binaries.ffmpeg, &args, true, None, cancel)?;
+    let label = format!("{}/{total}  {}", index + 1, job.target);
+    let (sender, watcher) = watch_progress(progress, &label, span);
+    let encoded = ffmpeg::run(&binaries.ffmpeg, &args, true, sender, cancel);
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
+    }
+    encoded?;
     let checked = ffmpeg::probe(binaries, &staged, cancel)?;
     verify_output(&checked, plan, job, span)?;
     ffmpeg::run(
@@ -342,8 +507,132 @@ fn export_one(binaries: &Binaries, plan: &Plan, job: &Job, folder: &Path, cancel
         cancel,
     )?;
     publish_new(&staged, &destination)?;
-    let _ = fs::remove_dir_all(&scratch);
-    Ok(destination)
+    Ok(Made { path: destination, skipped: false })
+}
+
+fn job_cuts(job: &Job) -> Vec<SpanCut> {
+    if job.segments.is_empty() {
+        vec![SpanCut { source: job.source.clone(), start: job.start, end: job.end }]
+    } else {
+        job.segments.clone()
+    }
+}
+
+fn span_of(binaries: &Binaries, cuts: &[SpanCut], cancel: &Cancel) -> StudioResult<Option<f64>> {
+    if cuts.is_empty() {
+        return Ok(None);
+    }
+    let mut total = 0.0;
+    let mut known = true;
+    for cut in cuts {
+        if let Some(end) = cut.end {
+            if end <= cut.start {
+                return Err(StudioError::new("起止点超出录音时长."));
+            }
+            total += end - cut.start;
+            continue;
+        }
+        let media = ffmpeg::probe(binaries, &cut.source, cancel)?;
+        if let Some(duration) = media.duration {
+            if cut.start >= duration {
+                return Err(StudioError::new("起止点超出录音时长."));
+            }
+            total += duration - cut.start;
+        } else {
+            known = false;
+        }
+    }
+    Ok(known.then_some(total))
+}
+
+fn stage_cuts(binaries: &Binaries, cuts: &[SpanCut], folder: &Path, cancel: &Cancel) -> StudioResult<(PathBuf, f64, Option<f64>, u32)> {
+    if cuts.len() <= 1 {
+        let cut = cuts.first().ok_or_else(|| StudioError::new("没有可导出的片段."))?;
+        let media = ffmpeg::probe(binaries, &cut.source, cancel)?;
+        if let Some(duration) = media.duration {
+            if cut.start >= duration || cut.end.is_some_and(|end| end > duration + 0.05) {
+                return Err(StudioError::new("起止点超出录音时长."));
+            }
+        }
+        return Ok((cut.source.clone(), cut.start, cut.end, media.channels));
+    }
+    let scratch = tempfile_dir(folder)?;
+    let mut parts = Vec::new();
+    let mut channels = 0u32;
+    for (index, cut) in cuts.iter().enumerate() {
+        let media = ffmpeg::probe(binaries, &cut.source, cancel)?;
+        channels = channels.max(media.channels);
+        if let Some(duration) = media.duration {
+            if cut.start >= duration || cut.end.is_some_and(|end| end > duration + 0.05) {
+                return Err(StudioError::new("起止点超出录音时长."));
+            }
+        }
+        let part = scratch.join(format!("part-{index}.flac"));
+        let mut args = vec![
+            "-hide_banner".into(),
+            "-nostdin".into(),
+            "-y".into(),
+            "-v".into(),
+            "error".into(),
+            "-xerror".into(),
+            "-ss".into(),
+            format!("{}", cut.start),
+            "-i".into(),
+            cut.source.display().to_string(),
+            "-map".into(),
+            "0:a:0".into(),
+        ];
+        if let Some(end) = cut.end {
+            args.push("-t".into());
+            args.push(format!("{}", end - cut.start));
+        }
+        args.extend(["-c:a".into(), "flac".into(), "-sample_fmt".into(), "s32".into(), part.display().to_string()]);
+        ffmpeg::run(&binaries.ffmpeg, &args, false, None, cancel)?;
+        parts.push(part);
+    }
+    let joined = scratch.join("joined.flac");
+    concatenate(binaries, &parts, &joined, cancel)?;
+    let media = ffmpeg::probe(binaries, &joined, cancel)?;
+    Ok((joined, 0.0, None, media.channels.max(channels)))
+}
+
+fn watch_progress(progress: &async_channel::Sender<String>, label: &str, span: Option<f64>) -> (Option<async_channel::Sender<f64>>, Option<std::thread::JoinHandle<()>>) {
+    let Some(span) = span.filter(|value| *value > 0.2) else {
+        return (None, None);
+    };
+    let (sender, receiver) = async_channel::unbounded();
+    let progress = progress.clone();
+    let label = label.to_string();
+    let handle = std::thread::spawn(move || {
+        while let Ok(seconds) = receiver.recv_blocking() {
+            let percent = (seconds / span * 100.0).clamp(0.0, 99.0);
+            let _ = progress.try_send(format!("{label}  {percent:.0}%"));
+        }
+    });
+    (Some(sender), Some(handle))
+}
+
+fn attach_mkv(args: &mut Vec<String>, cover: Option<&Path>, enabled: bool, index: usize) {
+    let Some(cover) = cover else {
+        return;
+    };
+    if !enabled {
+        return;
+    }
+    let mime = if cover.extension().and_then(|ext| ext.to_str()).unwrap_or("").eq_ignore_ascii_case("png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    let filename = cover.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| "cover.jpg".into());
+    args.extend([
+        "-attach".into(),
+        cover.display().to_string(),
+        format!("-metadata:s:t:{index}"),
+        format!("mimetype={mime}"),
+        format!("-metadata:s:t:{index}"),
+        format!("filename={filename}"),
+    ]);
 }
 
 pub(crate) fn verify_output(info: &MediaInfo, plan: &Plan, job: &Job, span: Option<f64>) -> StudioResult<()> {
@@ -376,7 +665,10 @@ pub(crate) fn verify_output(info: &MediaInfo, plan: &Plan, job: &Job, span: Opti
             if expected == actual {
                 continue;
             }
-            if *key == "Track" {
+            if matches!(*key, "Disc" | "TotalDiscs") && !matches!(plan.format.as_str(), "FLAC" | "MKV") {
+                continue;
+            }
+            if matches!(*key, "Track" | "Disc" | "TotalDiscs") {
                 if let (Ok(left), Ok(right)) = (expected.parse::<u32>(), actual.parse::<u32>()) {
                     if left == right {
                         continue;
@@ -409,6 +701,14 @@ fn tempfile_dir(folder: &Path) -> StudioResult<PathBuf> {
     let dir = folder.join(format!(".studio-{}", std::process::id()));
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+struct CleanDir(PathBuf);
+
+impl Drop for CleanDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn publish_new(source: &Path, destination: &Path) -> StudioResult<()> {
@@ -447,6 +747,16 @@ pub(crate) fn archive_artwork(folder: &Path, source: Option<&Path>, back: bool) 
     Ok(())
 }
 
+fn concat_filters(count: usize, rate: u32, layout: &str) -> Vec<String> {
+    let mut filters = Vec::new();
+    for index in 0..count {
+        filters.push(format!("[{index}:a:0]aformat=sample_fmts=s32:sample_rates={rate}:channel_layouts={layout},asetpts=N/SR/TB[a{index}]"));
+    }
+    let joined = (0..count).map(|index| format!("[a{index}]")).collect::<String>();
+    filters.push(format!("{joined}concat=n={count}:v=0:a=1[joined]"));
+    filters
+}
+
 pub fn concatenate(binaries: &Binaries, paths: &[PathBuf], output: &Path, cancel: &Cancel) -> StudioResult<MediaInfo> {
     if paths.len() < 2 {
         return Err(StudioError::new("拼接至少需要两段录音."));
@@ -467,12 +777,7 @@ pub fn concatenate(binaries: &Binaries, paths: &[PathBuf], output: &Path, cancel
     if channels > 2 && infos.iter().any(|info| info.channels != channels || info.layout != layout) {
         return Err(StudioError::new("多声道拼接要求所有片段使用相同声道布局."));
     }
-    let mut filters = Vec::new();
-    for index in 0..paths.len() {
-        filters.push(format!("[{index}:a:0]aformat=sample_fmts=s32:sample_rates={rate}:channel_layouts={layout},asetpts=N/SR/TB[a{index}]"));
-    }
-    let joined = (0..paths.len()).map(|index| format!("[a{index}]")).collect::<String>();
-    filters.push(format!("{joined}concat=n={}:v=0:a=1[joined]", paths.len()));
+    let filters = concat_filters(paths.len(), rate, &layout);
     let mut args = vec![
         "-hide_banner".into(),
         "-nostdin".into(),

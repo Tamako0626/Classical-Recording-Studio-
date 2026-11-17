@@ -16,7 +16,7 @@ pub const STATUSES: [&str; 9] = [
     "需修复",
 ];
 
-pub const TAG_KEYS: [&str; 9] = [
+pub const TAG_KEYS: [&str; 11] = [
     "Title",
     "Artist",
     "Album",
@@ -26,6 +26,8 @@ pub const TAG_KEYS: [&str; 9] = [
     "Conductor",
     "Soloist",
     "Orchestra",
+    "Disc",
+    "TotalDiscs",
 ];
 
 pub fn new_id() -> String {
@@ -161,6 +163,8 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub metadata: bool,
     #[serde(default)]
+    pub embed_back: bool,
+    #[serde(default)]
     pub effects: Effects,
 }
 
@@ -175,6 +179,7 @@ impl Default for Settings {
             cover: true,
             split: true,
             metadata: true,
+            embed_back: false,
             effects: Effects::default(),
         }
     }
@@ -200,6 +205,10 @@ pub struct Tags {
     pub soloist: String,
     #[serde(default, rename = "Orchestra")]
     pub orchestra: String,
+    #[serde(default, rename = "Disc")]
+    pub disc: String,
+    #[serde(default, rename = "TotalDiscs")]
+    pub total_discs: String,
 }
 
 impl Default for Tags {
@@ -214,6 +223,8 @@ impl Default for Tags {
             conductor: String::new(),
             soloist: String::new(),
             orchestra: String::new(),
+            disc: String::new(),
+            total_discs: String::new(),
         }
     }
 }
@@ -230,6 +241,8 @@ impl Tags {
             "Conductor" => &self.conductor,
             "Soloist" => &self.soloist,
             "Orchestra" => &self.orchestra,
+            "Disc" => &self.disc,
+            "TotalDiscs" => &self.total_discs,
             _ => "",
         }
     }
@@ -245,10 +258,25 @@ impl Tags {
             "Conductor" => &mut self.conductor,
             "Soloist" => &mut self.soloist,
             "Orchestra" => &mut self.orchestra,
+            "Disc" => &mut self.disc,
+            "TotalDiscs" => &mut self.total_discs,
             _ => return,
         };
         *slot = value;
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Segment {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub start: String,
+    #[serde(default)]
+    pub end: String,
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -265,6 +293,10 @@ pub struct Track {
     pub filename: String,
     #[serde(default)]
     pub tags: Tags,
+    #[serde(default)]
+    pub disc: u32,
+    #[serde(default)]
+    pub parts: Vec<Segment>,
 }
 
 impl Track {
@@ -276,6 +308,8 @@ impl Track {
             end: String::new(),
             filename: String::new(),
             tags: Tags::default(),
+            disc: 0,
+            parts: Vec::new(),
         }
     }
 }
@@ -333,6 +367,12 @@ pub struct Project {
     #[serde(default)]
     pub naming_rule: String,
     #[serde(default)]
+    pub disc_count: u32,
+    #[serde(default)]
+    pub disc_folders: bool,
+    #[serde(default)]
+    pub source_root: String,
+    #[serde(default)]
     pub settings: Settings,
 }
 
@@ -364,6 +404,9 @@ impl Project {
             auto_output: true,
             auto_join: false,
             naming_rule: DEFAULT_NAMING.into(),
+            disc_count: 0,
+            disc_folders: false,
+            source_root: String::new(),
             settings: Settings::default(),
         }
     }

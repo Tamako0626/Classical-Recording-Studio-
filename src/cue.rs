@@ -11,6 +11,7 @@ pub struct CueAlbum {
     pub artist: String,
     pub composer: String,
     pub date: String,
+    pub disc: u32,
 }
 
 impl Default for CueAlbum {
@@ -20,6 +21,7 @@ impl Default for CueAlbum {
             artist: String::new(),
             composer: String::new(),
             date: String::new(),
+            disc: 0,
         }
     }
 }
@@ -184,6 +186,12 @@ pub fn parse_cue(text: &str, files: &[(String, String)]) -> StudioResult<(CueAlb
         }
         if let Some(rest) = rem_key(line, "DATE") {
             assign_meta(target_is_track, &mut album, tracks.last_mut(), "date", unquote(rest));
+            continue;
+        }
+        if let Some(rest) = rem_key(line, "DISCNUMBER") {
+            if !target_is_track {
+                album.disc = unquote(rest).trim().parse::<u32>().unwrap_or(0);
+            }
             continue;
         }
         if let Some(rest) = rem_key(line, "COMPOSER") {
@@ -534,6 +542,206 @@ fn split_composer(title: &str) -> (String, String) {
     (title.trim().to_string(), String::new())
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscDraft {
+    pub number: u32,
+    pub label: String,
+    pub cue_path: String,
+    pub directory: String,
+    pub files: Vec<(String, String)>,
+    pub album: CueAlbum,
+    pub rows: Vec<CueTrack>,
+    pub issue: String,
+}
+
+pub fn gather_entries(paths: &[std::path::PathBuf]) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            collect_dir(path, &mut files);
+        } else if path.is_file() {
+            push_media(path, &mut files);
+        }
+    }
+    files.sort_by(|left, right| cmp_cd_name(&left.1, &right.1));
+    files
+}
+
+fn collect_dir(dir: &Path, files: &mut Vec<(String, String)>) {
+    let mut nested = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            nested.push(path);
+        } else if path.is_file() {
+            push_media(&path, files);
+        }
+    }
+    nested.sort_by(|left, right| cmp_cd_name(&left.display().to_string(), &right.display().to_string()));
+    for path in nested {
+        collect_dir(&path, files);
+    }
+}
+
+fn push_media(path: &Path, files: &mut Vec<(String, String)>) {
+    let Some(name) = path.file_name().map(|item| item.to_string_lossy().to_string()) else {
+        return;
+    };
+    if name.to_ascii_lowercase().ends_with(".cue") || crate::names::audio_name(&name) {
+        files.push((name, path.display().to_string()));
+    }
+}
+
+pub fn collect_discs(entries: &[(String, String)]) -> Vec<DiscDraft> {
+    let mut groups: std::collections::BTreeMap<String, Vec<(String, String)>> = std::collections::BTreeMap::new();
+    for (name, path) in entries {
+        let dir = Path::new(path).parent().map(|parent| parent.display().to_string()).unwrap_or_default();
+        groups.entry(dir).or_default().push((name.clone(), path.clone()));
+    }
+    let mut dirs: Vec<String> = groups.keys().cloned().collect();
+    dirs.sort_by(|left, right| cmp_cd_name(left, right));
+    let mut drafts = Vec::new();
+    for dir in dirs {
+        let files = groups.get(&dir).cloned().unwrap_or_default();
+        let audios: Vec<(String, String)> = files.iter().filter(|(name, _)| crate::names::audio_name(name)).cloned().collect();
+        let cues: Vec<(String, String)> = files.iter().filter(|(name, _)| name.to_ascii_lowercase().ends_with(".cue")).cloned().collect();
+        let dir_name = Path::new(&dir).file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| dir.clone());
+        if cues.is_empty() {
+            if !audios.is_empty() {
+                drafts.push(DiscDraft {
+                    number: directory_disc(&dir_name),
+                    label: dir_name,
+                    cue_path: String::new(),
+                    directory: dir,
+                    files: audios,
+                    album: CueAlbum::default(),
+                    rows: Vec::new(),
+                    issue: "未配对 CUE.".into(),
+                });
+            }
+            continue;
+        }
+        for (cue_name, cue_path) in &cues {
+            let read = std::fs::read(cue_path).map(|bytes| decode_cue(&bytes));
+            let label = if cues.len() == 1 { dir_name.clone() } else { format!("{dir_name} / {cue_name}") };
+            match read {
+                Ok(text) => match parse_cue(&text, &audios) {
+                    Ok((album, rows)) => {
+                        let number = if album.disc > 0 { album.disc } else { directory_disc(&dir_name) };
+                        drafts.push(DiscDraft {
+                            number,
+                            label,
+                            cue_path: cue_path.clone(),
+                            directory: dir.clone(),
+                            files: audios.clone(),
+                            album,
+                            rows,
+                            issue: String::new(),
+                        });
+                    }
+                    Err(error) => drafts.push(unparsed(directory_disc(&dir_name), label, cue_path, &dir, &audios, error.to_string())),
+                },
+                Err(error) => drafts.push(unparsed(directory_disc(&dir_name), label, cue_path, &dir, &audios, error.to_string())),
+            }
+        }
+    }
+    assign_disc_numbers(&mut drafts);
+    drafts
+}
+
+fn unparsed(number: u32, label: String, cue_path: &str, dir: &str, audios: &[(String, String)], issue: String) -> DiscDraft {
+    DiscDraft {
+        number,
+        label,
+        cue_path: cue_path.to_string(),
+        directory: dir.to_string(),
+        files: audios.to_vec(),
+        album: CueAlbum::default(),
+        rows: Vec::new(),
+        issue,
+    }
+}
+
+pub fn parse_disc_cue(cue_path: &Path, files: &[(String, String)]) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
+    let bytes = std::fs::read(cue_path)?;
+    parse_cue(&decode_cue(&bytes), files)
+}
+
+fn assign_disc_numbers(drafts: &mut [DiscDraft]) {
+    let mut used = std::collections::BTreeSet::new();
+    for draft in drafts.iter_mut() {
+        if draft.number == 0 || !used.insert(draft.number) {
+            draft.number = 0;
+        }
+    }
+    let mut next = 1u32;
+    for draft in drafts.iter_mut() {
+        if draft.number > 0 {
+            continue;
+        }
+        while !used.insert(next) {
+            next += 1;
+        }
+        draft.number = next;
+        next += 1;
+    }
+}
+
+pub fn directory_disc(name: &str) -> u32 {
+    let lower = name.to_ascii_lowercase();
+    for mark in ["disc", "disk", "cd"] {
+        let Some(pos) = lower.find(mark) else {
+            continue;
+        };
+        let tail = lower[pos + mark.len()..].trim_start_matches([' ', '-', '_', '.']);
+        let digits: String = tail.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        if let Ok(number) = digits.parse::<u32>() {
+            if number > 0 {
+                return number;
+            }
+        }
+    }
+    0
+}
+
+pub fn suite_title(albums: &[CueAlbum]) -> String {
+    let titles: Vec<String> = albums.iter().map(|album| strip_disc_suffix(&album.title)).filter(|title| !title.is_empty()).collect();
+    if titles.is_empty() {
+        return String::new();
+    }
+    if titles.iter().all(|title| title == &titles[0]) {
+        titles[0].clone()
+    } else {
+        titles[0].clone()
+    }
+}
+
+fn strip_disc_suffix(title: &str) -> String {
+    let mut text = title.trim().to_string();
+    if text.ends_with(')') {
+        if let Some(open) = text.rfind('(') {
+            let inner = text[open + 1..text.len() - 1].to_ascii_lowercase();
+            if inner.contains("cd") || inner.contains("disc") || inner.contains("disk") {
+                text = text[..open].trim().trim_end_matches(['-', '–', '—', ',']).trim().to_string();
+            }
+        }
+    }
+    let lower = text.to_ascii_lowercase();
+    for mark in [" cd ", " disc ", " disk "] {
+        if let Some(pos) = lower.rfind(mark) {
+            let tail = lower[pos + mark.len()..].trim();
+            if !tail.is_empty() && tail.chars().all(|ch| ch.is_ascii_digit()) {
+                text = text[..pos].trim().trim_end_matches(['-', '–', '—', ',']).trim().to_string();
+                break;
+            }
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +765,41 @@ FILE "disc.wav" WAVE
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].end, tracks[1].start);
         assert!(tracks[1].end.is_empty());
+    }
+
+    #[test]
+    fn pairs_a_box_set_and_keeps_same_filenames_apart() {
+        let root = std::env::temp_dir().join(format!("crs-cue-{}", uuid::Uuid::new_v4()));
+        let disc1 = root.join("CD1");
+        let disc2 = root.join("CD2");
+        std::fs::create_dir_all(&disc1).unwrap();
+        std::fs::create_dir_all(&disc2).unwrap();
+        let cue = |title: &str, disc: u32| {
+            format!(
+                "TITLE \"{title} (CD{disc})\"\nPERFORMER \"Pianist\"\nREM DISCNUMBER {disc}\nFILE \"image.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Sonata\"\n    INDEX 01 00:00:00\n"
+            )
+        };
+        std::fs::write(disc1.join("disc.cue"), cue("Recital", 1)).unwrap();
+        std::fs::write(disc2.join("disc.cue"), cue("Recital", 2)).unwrap();
+        std::fs::write(disc1.join("image.flac"), b"a").unwrap();
+        std::fs::write(disc2.join("image.flac"), b"b").unwrap();
+        let entries = gather_entries(&[root.clone()]);
+        let discs = collect_discs(&entries);
+        assert_eq!(discs.len(), 2, "{discs:?}");
+        assert_eq!(discs[0].number, 1);
+        assert_eq!(discs[1].number, 2);
+        assert!(discs[0].issue.is_empty() && discs[1].issue.is_empty());
+        assert_ne!(discs[0].rows[0].path, discs[1].rows[0].path);
+        assert_eq!(suite_title(&[discs[0].album.clone(), discs[1].album.clone()]), "Recital");
+        assert_eq!(directory_disc("Disc 12"), 12);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reports_a_cue_without_its_audio() {
+        let entries = vec![("lonely.cue".into(), r"C:\missing\lonely.cue".into())];
+        let discs = collect_discs(&entries);
+        assert_eq!(discs.len(), 1);
+        assert!(!discs[0].issue.is_empty());
     }
 }

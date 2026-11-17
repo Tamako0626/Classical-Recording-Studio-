@@ -52,6 +52,7 @@ pub struct Studio {
     page: Page,
     project_index: Option<usize>,
     track_index: Option<usize>,
+    track_picks: std::collections::BTreeSet<usize>,
     ffmpeg: Option<Binaries>,
     cancel: Cancel,
     player: Player,
@@ -80,7 +81,7 @@ pub struct Studio {
     gain: Entity<InputState>,
     width: Entity<InputState>,
     reverb: Entity<InputState>,
-    tags: [Entity<InputState>; 9],
+    tags: [Entity<InputState>; 11],
     noise_reduction: Entity<InputState>,
     highpass: Entity<InputState>,
     lowpass: Entity<InputState>,
@@ -98,7 +99,10 @@ pub struct Studio {
     cd_cue: bool,
     cd_files: Vec<(String, String)>,
     cd_rows: Vec<cue::CueTrack>,
+    cd_discs: Vec<cue::DiscDraft>,
+    cd_disc: Option<usize>,
     cd_notice: SharedString,
+    preflight: String,
     cd_title: Entity<InputState>,
     cd_artist: Entity<InputState>,
     cd_composer: Entity<InputState>,
@@ -157,6 +161,8 @@ impl Studio {
             input("Conductor", cx),
             input("Soloist", cx),
             input("Orchestra", cx),
+            input("Disc", cx),
+            input("TotalDiscs", cx),
         ];
         let noise_reduction = input("8", cx);
         let highpass = input("0", cx);
@@ -246,6 +252,7 @@ impl Studio {
             page: Page::Projects,
             project_index,
             track_index,
+            track_picks: std::collections::BTreeSet::new(),
             ffmpeg,
             cancel: Cancel::default(),
             player: Player::new(),
@@ -292,7 +299,10 @@ impl Studio {
             cd_cue: true,
             cd_files: Vec::new(),
             cd_rows: Vec::new(),
-            cd_notice: "选择音频, 或粘贴带轨号的文字.".into(),
+            cd_discs: Vec::new(),
+            cd_disc: None,
+            cd_notice: "可以一次选择多张碟的整轨和 CUE, 或粘贴带轨号的文字.".into(),
+            preflight: String::new(),
             cd_title,
             cd_artist,
             cd_composer,
@@ -507,6 +517,7 @@ impl Studio {
     fn select_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         self.project_index = Some(index);
+        self.track_picks.clear();
         self.track_index = self.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
         self.page = Page::Split;
         self.push(window, cx);
@@ -1080,8 +1091,9 @@ fn field(label: &'static str, input: &Entity<InputState>) -> Field {
 
 pub(super) fn reports_message(reports: &[TrackReport]) -> String {
     let ok = reports.iter().filter(|item| item.error.is_none()).count();
+    let skipped = reports.iter().filter(|item| item.skipped).count();
     let failed = reports.len() - ok;
-    let mut lines = vec![format!("完成 {ok} 轨, 失败 {failed} 轨.")];
+    let mut lines = vec![format!("完成 {ok} 轨, 跳过 {skipped} 轨, 失败 {failed} 轨.")];
     for item in reports.iter().filter(|item| item.error.is_some()).take(8) {
         lines.push(format!("{}: {}", item.target, item.error.as_deref().unwrap_or("")));
     }

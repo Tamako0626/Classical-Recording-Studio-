@@ -129,6 +129,8 @@ fn job(source: &Path, target: &str, start: f64, end: Option<f64>, title: &str) -
         start,
         end,
         tags: Tags { title: title.into(), ..Tags::default() },
+        disc: 0,
+        segments: Vec::new(),
     }
 }
 
@@ -185,7 +187,8 @@ fn concatenate_cuts_and_embeds_a_cover() {
     assert!(info.attached_pic);
     assert_eq!(info.tags.get("title").map(String::as_str), Some("Allegro"));
     let again = export::export_album(&bins, &made, &scratch.0, &cancel(), &progress()).unwrap();
-    assert!(again[0].error.as_deref().unwrap_or("").contains("同名"));
+    assert!(again[0].error.is_none(), "{:?}", again[0].error);
+    assert!(again[0].skipped);
     assert_eq!(fs::read(&first).unwrap(), original);
 
     made_out_of_range(&bins, &scratch, &joined);
@@ -323,6 +326,59 @@ fn cover_videos_follow_the_packaging_mode() {
     assert!(repeated[0].1.as_ref().unwrap_err().to_string().contains("已有同名"));
     assert_eq!(fs::read(&high).unwrap(), source_bytes);
     assert!(scratch_gone(&scratch.0));
+}
+
+#[test]
+fn segmented_exports_keep_the_sum_of_the_spans() {
+    let bins = bins();
+    let scratch = Scratch::new();
+    let first = scratch.path("left.wav");
+    let second = scratch.path("right.wav");
+    let long = scratch.path("long.wav");
+    write_tone(&first, 48000, 2, 1.0, 440.0, 0.2, 16);
+    write_tone(&second, 48000, 2, 1.0, 880.0, 0.2, 16);
+    write_tone(&long, 48000, 2, 2.0, 440.0, 0.2, 16);
+    let mut settings = Settings::default();
+    settings.cover = false;
+    settings.metadata = false;
+    settings.format = "FLAC".into();
+    settings.rate = 48000;
+
+    let mut across = job(&first, "across.flac", 0.0, Some(1.0), "Across");
+    across.segments = vec![
+        export::SpanCut { source: first.clone(), start: 0.0, end: Some(1.0) },
+        export::SpanCut { source: second.clone(), start: 0.0, end: Some(1.0) },
+    ];
+    let exported = export_ok(&bins, &plan("Box", settings.clone(), vec![across], None), &scratch.0);
+    let info = probe(&bins, &exported);
+    assert!((info.duration.unwrap() - 2.0).abs() < 0.3, "{}", info.duration.unwrap());
+    let samples = decode_s16(&bins, &exported, &scratch);
+    let expected = decode_s16(&bins, &first, &scratch).len() + decode_s16(&bins, &second, &scratch).len();
+    assert!((samples.len() as i64 - expected as i64).unsigned_abs() < 24_000, "{} vs {expected}", samples.len());
+
+    let mut gapped = job(&long, "gap.flac", 0.0, Some(0.5), "Gap");
+    gapped.segments = vec![
+        export::SpanCut { source: long.clone(), start: 0.0, end: Some(0.5) },
+        export::SpanCut { source: long.clone(), start: 1.5, end: Some(2.0) },
+    ];
+    let gap_out = export_ok(&bins, &plan("GapAlbum", settings.clone(), vec![gapped], None), &scratch.0);
+    let gap_info = probe(&bins, &gap_out);
+    assert!((gap_info.duration.unwrap() - 1.0).abs() < 0.3, "{}", gap_info.duration.unwrap());
+
+    let whole = job(&long, "whole.flac", 0.0, Some(2.0), "Whole");
+    let whole_out = export_ok(&bins, &plan("Whole", settings.clone(), vec![whole], None), &scratch.0);
+    let mut halves = job(&long, "halves.flac", 0.0, Some(1.0), "Halves");
+    halves.segments = vec![
+        export::SpanCut { source: long.clone(), start: 0.0, end: Some(1.0) },
+        export::SpanCut { source: long, start: 1.0, end: Some(2.0) },
+    ];
+    let halves_out = export_ok(&bins, &plan("Halves", settings, vec![halves], None), &scratch.0);
+    let whole_info = probe(&bins, &whole_out);
+    let halves_info = probe(&bins, &halves_out);
+    assert!((whole_info.duration.unwrap() - halves_info.duration.unwrap()).abs() < 0.3);
+    let whole_len = decode_s16(&bins, &whole_out, &scratch).len();
+    let halves_len = decode_s16(&bins, &halves_out, &scratch).len();
+    assert!((whole_len as i64 - halves_len as i64).unsigned_abs() < 24_000, "{whole_len} vs {halves_len}");
 }
 
 fn video_size(info: &MediaInfo) -> (u32, u32) {

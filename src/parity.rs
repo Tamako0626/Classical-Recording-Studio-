@@ -8,7 +8,7 @@ use crate::effects::filter_chain;
 use crate::export::{self, Job, Plan};
 use crate::ffmpeg::{self, MediaInfo};
 use crate::llm::{self, LlmConfig};
-use crate::model::{self, LogEntry, Project, ProjectFile, ProjectImport, Settings, Tags, Track, Workspace};
+use crate::model::{self, LogEntry, Project, ProjectFile, ProjectImport, Segment, Settings, Tags, Track, Workspace};
 use crate::names::{self, album_folder_name, apply_session_tags, batch_session_tags, filename_for, joined_end, track_tags};
 use crate::video::{self, VideoMode};
 
@@ -282,6 +282,8 @@ fn quality_check_matches_the_old_tolerances() {
             target: "01 - Sonata.flac".into(),
             start: 0.0,
             end: Some(10.0),
+            disc: 0,
+            segments: Vec::new(),
             tags: Tags {
                 title: "Sonata".into(),
                 track: "09".into(),
@@ -573,4 +575,31 @@ fn names_and_catalog_keep_earlier_cases() {
     assert!(hit.title.contains("Symphony No. 5"));
     let moonlight = crate::catalog::suggest_work("今晚的月光奏鸣曲").unwrap();
     assert!(moonlight.title.contains("Moonlight"));
+}
+
+#[test]
+fn old_project_file_exports_the_same_single_span() {
+    let scratch = Scratch::new();
+    let audio = scratch.file("a.wav", b"wav");
+    let json = r#"{"format":"classical-recording-studio/project","version":1,"project":{"id":"p1","name":"Recital","sources":["a.wav"],"tracks":[{"id":"t1","source":"a.wav","start":"00:00","end":"01:00","tags":{"Title":"Sonata"}}],"settings":{"cover":false,"metadata":true}}}"#;
+    let mut file: ProjectFile = serde_json::from_str(json).unwrap();
+    assert!(file.project.tracks[0].parts.is_empty());
+    assert_eq!(file.project.disc_count, 0);
+    assert!(file.project.tracks[0].tags.disc.is_empty());
+    file.project.source_paths.insert("a.wav".into(), audio.display().to_string());
+    let plan = export::prepare(&file.project).unwrap();
+    assert_eq!(plan.jobs[0].target, "01 - Sonata.flac");
+    assert_eq!(plan.jobs[0].start, 0.0);
+    assert_eq!(plan.jobs[0].end, Some(60.0));
+    assert_eq!(plan.jobs[0].segments.len(), 1);
+    file.project.tracks[0].parts = vec![
+        Segment { source: "a.wav".into(), start: "00:00".into(), end: "00:30".into(), title: "I".into() },
+        Segment { source: "a.wav".into(), start: "00:30".into(), end: "01:00".into(), title: "II".into() },
+    ];
+    let collapsed = export::prepare(&file.project).unwrap();
+    assert_eq!(collapsed.jobs[0].segments.len(), 1);
+    assert_eq!(collapsed.jobs[0].end, Some(60.0));
+    file.project.tracks[0].parts[1].start = "00:40".into();
+    let gapped = export::prepare(&file.project).unwrap();
+    assert_eq!(gapped.jobs[0].segments.len(), 2);
 }
