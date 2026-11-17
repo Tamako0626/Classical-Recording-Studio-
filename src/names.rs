@@ -152,10 +152,7 @@ pub fn session_tag_values(project: &Project) -> Tags {
 }
 
 pub fn source_id(disc: u32, file_name: &str) -> String {
-    let leaf = Path::new(file_name)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_name.to_string());
+    let leaf = source_leaf(file_name);
     if disc == 0 {
         leaf
     } else {

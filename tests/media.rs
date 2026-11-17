@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use classical_recording_studio::effects::filter_chain;
 use classical_recording_studio::export::{self, Job, Plan};
 use classical_recording_studio::ffmpeg::{self, Binaries, Cancel, MediaInfo};
-use classical_recording_studio::model::{Settings, Tags};
+use classical_recording_studio::model::{Project, Segment, Settings, Tags, Track};
 use classical_recording_studio::video::{self, VideoMode};
 
 const PNG_1X1: &[u8] = &[
@@ -379,6 +379,85 @@ fn segmented_exports_keep_the_sum_of_the_spans() {
     let whole_len = decode_s16(&bins, &whole_out, &scratch).len();
     let halves_len = decode_s16(&bins, &halves_out, &scratch).len();
     assert!((whole_len as i64 - halves_len as i64).unsigned_abs() < 24_000, "{whole_len} vs {halves_len}");
+}
+
+#[test]
+fn three_segments_drop_the_gaps_between_them() {
+    let bins = bins();
+    let scratch = Scratch::new();
+    let tone = scratch.path("tone.wav");
+    write_tone(&tone, 48000, 2, 3.0, 440.0, 0.2, 16);
+    let mut settings = Settings::default();
+    settings.cover = false;
+    settings.metadata = false;
+    settings.format = "FLAC".into();
+    settings.rate = 48000;
+    let mut cut = job(&tone, "three.flac", 0.0, Some(0.5), "");
+    cut.segments = vec![
+        export::SpanCut { source: tone.clone(), start: 0.0, end: Some(0.5) },
+        export::SpanCut { source: tone.clone(), start: 1.0, end: Some(1.5) },
+        export::SpanCut { source: tone, start: 2.0, end: Some(2.5) },
+    ];
+    let exported = export_ok(&bins, &plan("Three", settings, vec![cut], None), &scratch.0);
+    let duration = probe(&bins, &exported).duration.unwrap();
+    assert!((duration - 1.5).abs() < 0.3, "{duration}");
+}
+
+#[test]
+fn a_shorter_file_with_the_same_name_is_not_skipped() {
+    let bins = bins();
+    let scratch = Scratch::new();
+    let source = scratch.path("tone.wav");
+    let shorter = scratch.path("short.wav");
+    write_tone(&source, 48000, 2, 2.0, 440.0, 0.2, 16);
+    write_tone(&shorter, 48000, 2, 0.4, 440.0, 0.2, 16);
+    let mut settings = Settings::default();
+    settings.cover = false;
+    settings.metadata = false;
+    settings.format = "FLAC".into();
+    settings.rate = 48000;
+    let made = plan("Resume", settings, vec![job(&source, "01.flac", 0.0, Some(2.0), "")], None);
+    let exported = export_ok(&bins, &made, &scratch.0);
+    encode(&bins, &["-i", &shorter.display().to_string(), "-c:a", "flac", "-ar", "48000"], &exported);
+    let again = export::export_album(&bins, &made, &scratch.0, &cancel(), &progress()).unwrap();
+    let error = again[0].error.as_deref().unwrap_or("");
+    assert!(error.contains("同名"), "{error}");
+    assert!(error.contains("不一致"), "{error}");
+    assert!(!again[0].skipped);
+}
+
+#[test]
+fn contiguous_parts_export_like_one_span() {
+    let bins = bins();
+    let scratch = Scratch::new();
+    let source = scratch.path("sonata.wav");
+    write_tone(&source, 48000, 2, 2.0, 440.0, 0.2, 16);
+    let mut project = Project::blank();
+    project.name = "Recital".into();
+    project.settings.cover = false;
+    project.settings.metadata = false;
+    project.settings.format = "FLAC".into();
+    project.settings.rate = 48000;
+    project.sources = vec!["sonata.wav".into()];
+    project.source_paths.insert("sonata.wav".into(), source.display().to_string());
+    let mut track = Track::blank();
+    track.source = "sonata.wav".into();
+    track.start = "00:00".into();
+    track.end = "00:02".into();
+    track.tags.title = "Sonata".into();
+    track.parts = vec![
+        Segment { source: "sonata.wav".into(), start: "00:00".into(), end: "00:01".into(), title: "I".into() },
+        Segment { source: "sonata.wav".into(), start: "00:01".into(), end: "00:02".into(), title: "II".into() },
+    ];
+    project.tracks = vec![track];
+    let prepared = export::prepare(&project).unwrap();
+    assert_eq!(prepared.jobs[0].segments.len(), 1);
+    assert_eq!(prepared.jobs[0].end, Some(2.0));
+    let joined = export_ok(&bins, &prepared, &scratch.0);
+    let whole = export_ok(&bins, &plan("Whole", project.settings, vec![job(&source, "whole.flac", 0.0, Some(2.0), "Sonata")], None), &scratch.0);
+    let joined_len = decode_s16(&bins, &joined, &scratch).len();
+    let whole_len = decode_s16(&bins, &whole, &scratch).len();
+    assert!((joined_len as i64 - whole_len as i64).unsigned_abs() < 24_000, "{joined_len} vs {whole_len}");
 }
 
 fn video_size(info: &MediaInfo) -> (u32, u32) {
