@@ -1668,6 +1668,19 @@ fn apply_studio_theme(cx: &mut App) {
         theme.radius_lg = px(14.);
         theme.font_family = "Microsoft YaHei".into();
         theme.font_size = px(14.);
+        theme.button = rgb(0xffffff).into();
+        theme.button_hover = rgb(0xf0ebfa).into();
+        theme.button_active = rgb(0xe4dcf3).into();
+        theme.button_foreground = rgb(0x222037).into();
+        theme.button_primary = rgb(0x5a3da8).into();
+        theme.button_primary_hover = rgb(0x4b2e93).into();
+        theme.button_primary_active = rgb(0x3d2778).into();
+        theme.button_primary_foreground = rgb(0xffffff).into();
+        theme.secondary_foreground = rgb(0x59536d).into();
+        theme.danger = rgb(0xa33049).into();
+        theme.input = rgb(0xdcd7e6).into();
+        theme.ring = rgb(0x7851d7).into();
+        theme.shadow = false;
     });
 }
 
