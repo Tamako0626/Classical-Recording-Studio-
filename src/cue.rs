@@ -135,6 +135,10 @@ pub fn cmp_cd_name(left: &str, right: &str) -> std::cmp::Ordering {
 }
 
 pub fn parse_cue(text: &str, files: &[(String, String)]) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
+    parse_cue_in(text, files, "")
+}
+
+fn parse_cue_in(text: &str, files: &[(String, String)], prefer_dir: &str) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
     let mut album = CueAlbum::default();
     let mut tracks = Vec::<RawTrack>::new();
     let mut reference = String::new();
@@ -237,7 +241,7 @@ pub fn parse_cue(text: &str, files: &[(String, String)]) -> StudioResult<(CueAlb
         if track.reference.is_empty() {
             return Err(StudioError::new(format!("第 {} 轨缺少 FILE 或 INDEX 01.", track.number)));
         }
-        let file = match_file(&track.reference, files)?;
+        let file = match_file(&track.reference, files, prefer_dir)?;
         let key = file.0.to_lowercase();
         if let Some(prior) = previous.get(&key).copied() {
             let prior_frames = time_to_frames(&rows[prior].start);
@@ -278,22 +282,40 @@ fn time_to_frames(value: &str) -> i64 {
     (seconds * 75.0).round() as i64
 }
 
-fn match_file(reference: &str, files: &[(String, String)]) -> StudioResult<(String, String)> {
+fn parent_dir(path: &str) -> String {
+    Path::new(path).parent().map(|parent| parent.display().to_string()).unwrap_or_default()
+}
+
+fn file_stem(name: &str) -> String {
+    Path::new(name).file_stem().map(|stem| stem.to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+fn match_file(reference: &str, files: &[(String, String)], prefer_dir: &str) -> StudioResult<(String, String)> {
     let wanted = reference.to_lowercase();
-    let exact: Vec<_> = files.iter().filter(|(name, _)| name.to_lowercase() == wanted).cloned().collect();
-    if exact.len() == 1 {
-        return Ok(exact[0].clone());
+    let wanted_stem = file_stem(reference);
+    let local = |path: &str| prefer_dir.is_empty() || parent_dir(path) == prefer_dir;
+    let choose = |items: Vec<(String, String)>| (items.len() == 1).then(|| items[0].clone());
+    let exact_local: Vec<_> = files.iter().filter(|(name, path)| name.to_lowercase() == wanted && local(path)).cloned().collect();
+    if exact_local.len() > 1 {
+        return Err(StudioError::new(format!("请导入 CUE 引用的音频文件: {reference}.")));
     }
-    let stem = |name: &str| {
-        Path::new(name)
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_lowercase())
-            .unwrap_or_default()
-    };
-    let wanted_stem = stem(reference);
-    let loose: Vec<_> = files.iter().filter(|(name, _)| stem(name) == wanted_stem).cloned().collect();
-    if loose.len() == 1 {
-        return Ok(loose[0].clone());
+    if let Some(found) = choose(exact_local) {
+        return Ok(found);
+    }
+    let stem_local: Vec<_> = files.iter().filter(|(name, path)| file_stem(name) == wanted_stem && local(path)).cloned().collect();
+    if stem_local.len() > 1 {
+        return Err(StudioError::new(format!("请导入 CUE 引用的音频文件: {reference}.")));
+    }
+    if let Some(found) = choose(stem_local) {
+        return Ok(found);
+    }
+    let exact: Vec<_> = files.iter().filter(|(name, _)| name.to_lowercase() == wanted).cloned().collect();
+    if let Some(found) = choose(exact) {
+        return Ok(found);
+    }
+    let loose: Vec<_> = files.iter().filter(|(name, _)| file_stem(name) == wanted_stem).cloned().collect();
+    if let Some(found) = choose(loose) {
+        return Ok(found);
     }
     Err(StudioError::new(format!("请导入 CUE 引用的音频文件: {reference}.")))
 }
@@ -601,9 +623,12 @@ pub fn collect_discs(entries: &[(String, String)]) -> Vec<DiscDraft> {
         let dir = Path::new(path).parent().map(|parent| parent.display().to_string()).unwrap_or_default();
         groups.entry(dir).or_default().push((name.clone(), path.clone()));
     }
+    let all_audios: Vec<(String, String)> = entries.iter().filter(|(name, _)| crate::names::audio_name(name)).cloned().collect();
     let mut dirs: Vec<String> = groups.keys().cloned().collect();
     dirs.sort_by(|left, right| cmp_cd_name(left, right));
     let mut drafts = Vec::new();
+    let mut used = std::collections::BTreeSet::new();
+    let mut bare = Vec::new();
     for dir in dirs {
         let files = groups.get(&dir).cloned().unwrap_or_default();
         let audios: Vec<(String, String)> = files.iter().filter(|(name, _)| crate::names::audio_name(name)).cloned().collect();
@@ -611,16 +636,7 @@ pub fn collect_discs(entries: &[(String, String)]) -> Vec<DiscDraft> {
         let dir_name = Path::new(&dir).file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| dir.clone());
         if cues.is_empty() {
             if !audios.is_empty() {
-                drafts.push(DiscDraft {
-                    number: directory_disc(&dir_name),
-                    label: dir_name,
-                    cue_path: String::new(),
-                    directory: dir,
-                    files: audios,
-                    album: CueAlbum::default(),
-                    rows: Vec::new(),
-                    issue: "未配对 CUE.".into(),
-                });
+                bare.push((dir, dir_name, audios));
             }
             continue;
         }
@@ -628,15 +644,22 @@ pub fn collect_discs(entries: &[(String, String)]) -> Vec<DiscDraft> {
             let read = std::fs::read(cue_path).map(|bytes| decode_cue(&bytes));
             let label = if cues.len() == 1 { dir_name.clone() } else { format!("{dir_name} / {cue_name}") };
             match read {
-                Ok(text) => match parse_cue(&text, &audios) {
+                Ok(text) => match parse_cue_in(&text, &all_audios, &dir) {
                     Ok((album, rows)) => {
+                        let mut files = audios.clone();
+                        for row in &rows {
+                            used.insert(row.path.clone());
+                            if !row.path.is_empty() && !files.iter().any(|(_, path)| path == &row.path) {
+                                files.push((row.source.clone(), row.path.clone()));
+                            }
+                        }
                         let number = if album.disc > 0 { album.disc } else { directory_disc(&dir_name) };
                         drafts.push(DiscDraft {
                             number,
                             label,
                             cue_path: cue_path.clone(),
                             directory: dir.clone(),
-                            files: audios.clone(),
+                            files,
                             album,
                             rows,
                             issue: String::new(),
@@ -647,6 +670,22 @@ pub fn collect_discs(entries: &[(String, String)]) -> Vec<DiscDraft> {
                 Err(error) => drafts.push(unparsed(directory_disc(&dir_name), label, cue_path, &dir, &audios, error.to_string())),
             }
         }
+    }
+    for (dir, dir_name, audios) in bare {
+        let left: Vec<_> = audios.into_iter().filter(|(_, path)| !used.contains(path)).collect();
+        if left.is_empty() {
+            continue;
+        }
+        drafts.push(DiscDraft {
+            number: directory_disc(&dir_name),
+            label: dir_name,
+            cue_path: String::new(),
+            directory: dir,
+            files: left,
+            album: CueAlbum::default(),
+            rows: Vec::new(),
+            issue: "未配对 CUE.".into(),
+        });
     }
     assign_disc_numbers(&mut drafts);
     drafts
@@ -666,8 +705,12 @@ fn unparsed(number: u32, label: String, cue_path: &str, dir: &str, audios: &[(St
 }
 
 pub fn parse_disc_cue(cue_path: &Path, files: &[(String, String)]) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
+    parse_disc_cue_near(cue_path, files, "")
+}
+
+pub fn parse_disc_cue_near(cue_path: &Path, files: &[(String, String)], prefer_dir: &str) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
     let bytes = std::fs::read(cue_path)?;
-    parse_cue(&decode_cue(&bytes), files)
+    parse_cue_in(&decode_cue(&bytes), files, prefer_dir)
 }
 
 fn assign_disc_numbers(drafts: &mut [DiscDraft]) {
@@ -792,6 +835,22 @@ FILE "disc.wav" WAVE
         assert_ne!(discs[0].rows[0].path, discs[1].rows[0].path);
         assert_eq!(suite_title(&[discs[0].album.clone(), discs[1].album.clone()]), "Recital");
         assert_eq!(directory_disc("Disc 12"), 12);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pairs_a_cue_with_audio_in_another_folder() {
+        let root = std::env::temp_dir().join(format!("crs-cue-split-{}", uuid::Uuid::new_v4()));
+        let audio = root.join("audio");
+        let cues = root.join("cues");
+        std::fs::create_dir_all(&audio).unwrap();
+        std::fs::create_dir_all(&cues).unwrap();
+        std::fs::write(audio.join("CD1.flac"), b"a").unwrap();
+        std::fs::write(cues.join("CD1.cue"), "TITLE \"Box\"\nFILE \"CD1.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Sonata\"\n    INDEX 01 00:00:00\n").unwrap();
+        let discs = collect_discs(&gather_entries(&[root.clone()]));
+        assert_eq!(discs.len(), 1, "{discs:?}");
+        assert!(discs[0].issue.is_empty(), "{}", discs[0].issue);
+        assert!(discs[0].rows[0].path.contains("CD1.flac"));
         let _ = std::fs::remove_dir_all(root);
     }
 

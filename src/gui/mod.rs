@@ -107,6 +107,14 @@ pub struct Studio {
     play_generation: u64,
     pending_listen: Option<(f64, Option<f64>)>,
     movement_open: bool,
+    stitch_on: bool,
+    stitch_paths: Vec<std::path::PathBuf>,
+    stitch_slices: Vec<crate::names::StitchSlice>,
+    stitch_total: f64,
+    stitch_at: f64,
+    stitch_index: usize,
+    stitch_virtual_origin: f64,
+    stitch_note: bool,
     project_index: Option<usize>,
     track_index: Option<usize>,
     track_picks: std::collections::BTreeSet<usize>,
@@ -187,6 +195,7 @@ pub struct Studio {
     progress_task: Option<Task<()>>,
     duration_task: Option<Task<()>>,
     clock_task: Option<Task<()>>,
+    stitch_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -345,6 +354,14 @@ impl Studio {
             play_generation: 0,
             pending_listen: None,
             movement_open: false,
+            stitch_on: false,
+            stitch_paths: Vec::new(),
+            stitch_slices: Vec::new(),
+            stitch_total: 0.0,
+            stitch_at: 0.0,
+            stitch_index: 0,
+            stitch_virtual_origin: 0.0,
+            stitch_note: false,
             project_index,
             track_index,
             track_picks: std::collections::BTreeSet::new(),
@@ -425,6 +442,7 @@ impl Studio {
             progress_task: None,
             duration_task: None,
             clock_task: None,
+            stitch_task: None,
             _subscriptions: subscriptions,
         };
         studio.push(window, cx);
@@ -549,8 +567,10 @@ impl Studio {
         effects.fade_out = fade_out;
         effects.limiter = limiter;
         if let Some(track) = track_index.and_then(|index| project.tracks.get_mut(index)) {
-            track.start = start;
-            track.end = end;
+            if track.parts.len() < 2 {
+                track.start = start;
+                track.end = end;
+            }
             track.filename = filename;
             for (key, value) in TAG_KEYS.iter().zip(tags) {
                 track.tags.set(key, value);

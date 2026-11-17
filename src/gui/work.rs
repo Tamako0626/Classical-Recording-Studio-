@@ -29,6 +29,12 @@ use crate::video::{self, VideoMode};
 
 use super::{set_text, text, JobMsg, PlayedClip, Studio};
 
+enum ClockTick {
+    Continue,
+    Stop,
+    Advance(usize),
+}
+
 const AUDIO_EXT: &[&str] = &["wav", "flac", "mp3", "mkv", "ape", "m4a", "aac", "aiff", "aif", "ogg", "opus", "wv"];
 const CD_EXT: &[&str] = &["wav", "flac", "mp3", "mkv", "ape", "m4a", "aac", "aiff", "aif", "ogg", "opus", "wv", "cue"];
 
@@ -299,10 +305,21 @@ impl Studio {
         for (index, source) in project.sources.iter().enumerate() {
             list = list.child(format!("{}. {source}", index + 1));
         }
-        let total = self.preview_duration.unwrap_or(0.0);
-        let clock = format!("{} / {}", names::format_seconds(self.playhead), names::format_seconds(total));
-        let short = format!("{} / {}", short_clock(self.playhead), short_clock(total));
-        let info = if project.sources.is_empty() { "请选择原始音频文件。" } else { "使用所选文件试听整场录音。" };
+        let file_total = self.preview_duration.unwrap_or(0.0);
+        let clock = format!("{} / {}", names::format_seconds(self.playhead), names::format_seconds(file_total));
+        let (bar_at, bar_total) = if self.stitch_on { (self.stitch_at, self.stitch_total) } else { (self.playhead, file_total) };
+        let short = if self.stitch_on {
+            format!("拼接 {} / {}", short_clock(bar_at), short_clock(bar_total))
+        } else {
+            format!("{} / {}", short_clock(bar_at), short_clock(bar_total))
+        };
+        let info = if self.stitch_on {
+            "正在按拼接后的时间轴试听. 下面的时钟仍是录音文件里的位置, 可以取播放点."
+        } else if project.sources.is_empty() {
+            "请选择原始音频文件。"
+        } else {
+            "使用所选文件试听整场录音。"
+        };
         div()
             .flex()
             .flex_col()
@@ -440,6 +457,32 @@ impl Studio {
                 }))));
             if selected == Some(index) {
                 let prefix = format!("row{index}");
+                let stitched = track.parts.len() >= 2;
+                let mut title_col = div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .child(flat_input(&self.tags[0]))
+                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("输出文件名（不含扩展名）"))
+                    .child(flat_input(&self.filename));
+                if stitched {
+                    title_col = title_col.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("导出和试听按这些段落拼接, 空隙不保留."));
+                    for line in names::describe_stitch(&track.parts) {
+                        title_col = title_col.child(div().text_size(px(12.)).child(line));
+                    }
+                }
+                let start_cell = if stitched {
+                    div().w(px(168.)).text_size(px(12.)).text_color(rgb(0x66647a)).child("按左侧段落")
+                } else {
+                    div().w(px(168.)).flex().flex_row().items_center().gap(px(4.)).child(div().flex_1().min_w(px(0.)).child(flat_input(&self.start))).child(text_btn(Button::new(SharedString::from(format!("take-start-{id}"))).label("取播放点").on_click(cx.listener(|this, _, window, cx| this.stamp_time(false, window, cx)))))
+                };
+                let end_cell = if stitched {
+                    div().w(px(168.)).text_size(px(12.)).text_color(rgb(0x66647a)).child("取播放点见下方时钟")
+                } else {
+                    div().w(px(168.)).flex().flex_row().items_center().gap(px(4.)).child(div().flex_1().min_w(px(0.)).child(flat_input(&self.end))).child(text_btn(Button::new(SharedString::from(format!("take-end-{id}"))).label("取播放点").on_click(cx.listener(|this, _, window, cx| this.stamp_time(true, window, cx)))))
+                };
                 list = list.child(
                     div()
                         .flex()
@@ -452,30 +495,29 @@ impl Studio {
                         .border_color(rgb(0xede9f3))
                         .child(check)
                         .child(div().w(px(36.)).text_size(px(12.)).child(order))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(5.))
-                                .child(flat_input(&self.tags[0]))
-                                .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("输出文件名（不含扩展名）"))
-                                .child(flat_input(&self.filename)),
-                        )
+                        .child(title_col)
                         .child(div().w(px(170.)).child(self.source_picker(project, &prefix, cx)))
-                        .child(
-                            div().w(px(168.)).flex().flex_row().items_center().gap(px(4.)).child(div().flex_1().min_w(px(0.)).child(flat_input(&self.start))).child(text_btn(Button::new(SharedString::from(format!("take-start-{id}"))).label("取播放点").on_click(cx.listener(|this, _, window, cx| this.stamp_time(false, window, cx))))),
-                        )
-                        .child(
-                            div().w(px(168.)).flex().flex_row().items_center().gap(px(4.)).child(div().flex_1().min_w(px(0.)).child(flat_input(&self.end))).child(text_btn(Button::new(SharedString::from(format!("take-end-{id}"))).label("取播放点").on_click(cx.listener(|this, _, window, cx| this.stamp_time(true, window, cx))))),
-                        )
+                        .child(start_cell)
+                        .child(end_cell)
                         .child(actions),
                 );
             } else {
-                let title = if track.tags.title.trim().is_empty() { "未命名曲目".to_string() } else { track.tags.title.clone() };
+                let title = if track.parts.len() >= 2 {
+                    let name = if track.tags.title.trim().is_empty() { "未命名曲目".to_string() } else { track.tags.title.clone() };
+                    format!("{name}  ({} 段拼接)", track.parts.len())
+                } else if track.tags.title.trim().is_empty() {
+                    "未命名曲目".to_string()
+                } else {
+                    track.tags.title.clone()
+                };
                 let leaf = if track.source.is_empty() { "请选择音频文件".to_string() } else { names::source_leaf(&track.source) };
-                let end = if track.end.trim().is_empty() { "自动".to_string() } else { track.end.clone() };
+                let end = if track.parts.len() >= 2 {
+                    "按段落".to_string()
+                } else if track.end.trim().is_empty() {
+                    "自动".to_string()
+                } else {
+                    track.end.clone()
+                };
                 list = list.child(
                     div()
                         .flex()
@@ -494,7 +536,7 @@ impl Studio {
                             ),
                         )
                         .child(div().w(px(170.)).text_size(px(12.)).child(leaf))
-                        .child(div().w(px(168.)).text_size(px(12.)).child(track.start.clone()))
+                        .child(div().w(px(168.)).text_size(px(12.)).child(if track.parts.len() >= 2 { "按段落".to_string() } else { track.start.clone() }))
                         .child(div().w(px(168.)).text_size(px(12.)).child(end))
                         .child(actions),
                 );
@@ -654,7 +696,9 @@ impl Studio {
         let mut discs = div().flex().flex_col().gap_1();
         for (index, disc) in self.cd_discs.iter().enumerate() {
             let issue = if disc.issue.is_empty() { String::new() } else { format!("  {}", disc.issue) };
-            let label = format!("碟 {:02}  {}  {} 轨{issue}", disc.number, disc.label, disc.rows.len());
+            let cue_name = if disc.cue_path.is_empty() { "未配对 CUE".to_string() } else { names::source_leaf(&disc.cue_path) };
+            let audio_name = disc_audio_names(disc);
+            let label = format!("碟 {:02}  {cue_name} → {audio_name}  {} 轨{issue}", disc.number, disc.rows.len());
             discs = discs.child(
                 Button::new(SharedString::from(format!("cd-disc-{index}")))
                     .small()
@@ -678,6 +722,7 @@ impl Studio {
         }
         super::surface()
             .child(Label::new("一套 CD 可以一次加入多张整轨和对应 CUE, 封面封底全套共用."))
+            .child(Label::new(format!("已配对 {} / {} 张. 封面和封底全套共用.", self.cd_discs.iter().filter(|disc| disc.issue.is_empty() && !disc.rows.is_empty()).count(), self.cd_discs.len())))
             .child(Label::new(self.cd_notice.clone()))
             .child(
                 div()
@@ -921,6 +966,7 @@ impl Studio {
         self.player.stop();
         self.playing = false;
         self.play_generation = self.play_generation.wrapping_add(1);
+        self.clear_stitch();
         self.push_track(window, cx);
         cx.notify();
     }
@@ -1441,6 +1487,11 @@ impl Studio {
             self.show_error("请先选择曲目.", cx);
             return;
         };
+        if track.parts.len() >= 2 {
+            self.stitch_note = processed;
+            self.play_stitch_from(0.0, if processed { Some(20.0) } else { None }, cx);
+            return;
+        }
         let start = match names::time_seconds(&track.start) {
             Ok(value) => value.unwrap_or(0.0),
             Err(error) => {
@@ -1457,6 +1508,7 @@ impl Studio {
             }
         };
         self.playhead = start;
+        self.clear_stitch();
         if processed {
             self.extract_preview(start, 20.0, true, false, cx);
         } else {
@@ -1465,10 +1517,19 @@ impl Studio {
     }
 
     fn preview_window(&mut self, cx: &mut Context<Self>) {
-        self.start_listen(self.playhead, Some(20.0), cx);
+        if self.stitch_on {
+            self.play_stitch_from(self.stitch_at, Some(20.0), cx);
+        } else {
+            self.start_listen(self.playhead, Some(20.0), cx);
+        }
     }
 
     pub(super) fn seek_preview(&mut self, delta: f64, cx: &mut Context<Self>) {
+        if self.stitch_on {
+            let next = chrome::nudge_playhead(self.stitch_at, delta).min(self.stitch_total);
+            self.play_stitch_from(next, None, cx);
+            return;
+        }
         let mut next = chrome::nudge_playhead(self.playhead, delta);
         if let Some(duration) = self.preview_duration.filter(|value| value.is_finite() && *value > 0.0) {
             next = next.min(duration);
@@ -1484,6 +1545,7 @@ impl Studio {
     }
 
     fn return_preview(&mut self, cx: &mut Context<Self>) {
+        self.clear_stitch();
         self.playhead = 0.0;
         self.start_listen(0.0, None, cx);
     }
@@ -1497,7 +1559,22 @@ impl Studio {
             cx.notify();
             return;
         }
-        self.start_listen(self.playhead, None, cx);
+        if self.stitch_on {
+            self.play_stitch_from(self.stitch_at, None, cx);
+        } else {
+            self.start_listen(self.playhead, None, cx);
+        }
+    }
+
+    fn clear_stitch(&mut self) {
+        self.stitch_on = false;
+        self.stitch_paths.clear();
+        self.stitch_slices.clear();
+        self.stitch_total = 0.0;
+        self.stitch_at = 0.0;
+        self.stitch_index = 0;
+        self.stitch_virtual_origin = 0.0;
+        self.stitch_note = false;
     }
 
     fn start_listen(&mut self, start: f64, limit: Option<f64>, cx: &mut Context<Self>) {
@@ -1639,40 +1716,164 @@ impl Studio {
         self.play_generation = self.play_generation.wrapping_add(1);
         let generation = self.play_generation;
         self.playing = true;
-        self.status = "正在试听.".into();
+        self.status = if self.stitch_on && self.stitch_note { "拼接试听先不套用效果.".into() } else { "正在试听.".into() };
         self.clock_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
                 let done = this
                     .update(cx, |this, cx| {
                         if this.play_generation != generation || !this.playing {
-                            return true;
+                            return ClockTick::Stop;
                         }
                         let elapsed = this.play_mark.elapsed().as_secs_f64();
+                        if this.stitch_on {
+                            this.stitch_at = this.stitch_virtual_origin + elapsed.min(this.play_span);
+                        }
                         if elapsed >= this.play_span {
                             this.playhead = this.play_origin + this.play_span;
+                            if this.stitch_on {
+                                this.stitch_at = this.stitch_virtual_origin + this.play_span;
+                                let next = this.stitch_index + 1;
+                                if next < this.stitch_slices.len() {
+                                    cx.notify();
+                                    return ClockTick::Advance(next);
+                                }
+                            }
                             this.playing = false;
                             this.player.stop();
                             cx.notify();
-                            return true;
+                            return ClockTick::Stop;
                         }
                         this.playhead = this.play_origin + elapsed;
                         cx.notify();
-                        false
+                        ClockTick::Continue
                     })
-                    .unwrap_or(true);
-                if done {
-                    break;
+                    .unwrap_or(ClockTick::Stop);
+                match done {
+                    ClockTick::Continue => {}
+                    ClockTick::Stop => break,
+                    ClockTick::Advance(index) => {
+                        this.update(cx, |this, cx| this.play_stitch_index(index, cx)).ok();
+                        break;
+                    }
                 }
             }
         }));
         cx.notify();
     }
 
+    fn play_stitch_from(&mut self, from: f64, limit: Option<f64>, cx: &mut Context<Self>) {
+        self.pull(cx);
+        if self.busy {
+            return;
+        }
+        let Some(project) = self.project().cloned() else {
+            return;
+        };
+        let Some(track) = self.track_index.and_then(|index| project.tracks.get(index)).cloned() else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        let cuts = match names::stitch_cuts(&track.parts) {
+            Ok(cuts) => cuts,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let mut paths = Vec::new();
+        let mut spans = Vec::new();
+        let mut missing = Vec::new();
+        for cut in &cuts {
+            let path = match export::resolve_source(&project, &cut.source) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.show_error(error.to_string(), cx);
+                    return;
+                }
+            };
+            if cut.end.is_none() {
+                missing.push((cut.source.clone(), path.clone()));
+            }
+            paths.push(path);
+            spans.push((cut.source.clone(), cut.start, cut.end));
+        }
+        if missing.is_empty() {
+            let durations = vec![None; spans.len()];
+            self.arm_stitch(paths, &spans, &durations, from, limit, cx);
+            return;
+        }
+        let Some(binaries) = self.ffmpeg.clone() else {
+            self.show_error("未找到裁剪版 FFmpeg.", cx);
+            return;
+        };
+        let cancel = self.cancel.clone();
+        self.stitch_task = Some(cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let mut map = std::collections::BTreeMap::new();
+                    for (id, path) in missing {
+                        let seconds = ffmpeg::probe(&binaries, &path, &cancel).ok().and_then(|info| info.duration);
+                        map.insert(id, seconds);
+                    }
+                    map
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let durations: Vec<Option<f64>> = spans.iter().map(|(id, _, _)| found.get(id).copied().flatten()).collect();
+                this.arm_stitch(paths, &spans, &durations, from, limit, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn arm_stitch(&mut self, paths: Vec<std::path::PathBuf>, spans: &[(String, f64, Option<f64>)], file_durations: &[Option<f64>], from: f64, limit: Option<f64>, cx: &mut Context<Self>) {
+        let times: Vec<(f64, Option<f64>)> = spans.iter().map(|(_, start, end)| (*start, *end)).collect();
+        match names::stitch_queue(&times, file_durations, from, limit) {
+            Ok((slices, total)) => {
+                if slices.is_empty() {
+                    self.show_error("已经到拼接末尾.", cx);
+                    return;
+                }
+                self.stitch_on = true;
+                self.stitch_paths = paths;
+                self.stitch_slices = slices;
+                self.stitch_total = total;
+                self.stitch_at = from.max(0.0);
+                self.play_stitch_index(0, cx);
+            }
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+    }
+
+    fn play_stitch_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(slice) = self.stitch_slices.get(index).cloned() else {
+            self.playing = false;
+            self.player.stop();
+            return;
+        };
+        let Some(path) = self.stitch_paths.get(slice.index).cloned() else {
+            self.show_error("找不到拼接用的录音.", cx);
+            return;
+        };
+        self.stitch_index = index;
+        self.stitch_at = slice.virtual_at;
+        self.stitch_virtual_origin = slice.virtual_at;
+        self.playhead = slice.source_at;
+        match self.player.play_at(path, std::time::Duration::from_secs_f64(slice.source_at)) {
+            Ok(()) => self.begin_clock(slice.source_at, slice.seconds, cx),
+            Err(error) => {
+                self.playing = false;
+                self.show_error(error.to_string(), cx);
+            }
+        }
+    }
+
     fn seek_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         const PARTS: usize = 40;
-        let duration = self.preview_duration.unwrap_or(0.0);
-        let played = if duration > 0.0 { (self.playhead / duration).clamp(0.0, 1.0) } else { 0.0 };
+        let duration = if self.stitch_on { self.stitch_total } else { self.preview_duration.unwrap_or(0.0) };
+        let at = if self.stitch_on { self.stitch_at } else { self.playhead };
+        let played = if duration > 0.0 { (at / duration).clamp(0.0, 1.0) } else { 0.0 };
         let filled = (played * PARTS as f64).round() as usize;
         let mut bar = div().flex_1().h(px(40.)).flex().flex_row().items_center();
         for index in 0..PARTS {
@@ -1686,8 +1887,12 @@ impl Studio {
                     .items_center()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        let duration = this.preview_duration.unwrap_or(0.0);
-                        this.seek_to(names::seek_at(index, PARTS, duration), cx);
+                        if this.stitch_on {
+                            this.play_stitch_from(names::seek_at(index, PARTS, this.stitch_total), None, cx);
+                        } else {
+                            let duration = this.preview_duration.unwrap_or(0.0);
+                            this.seek_to(names::seek_at(index, PARTS, duration), cx);
+                        }
                     }))
                     .child(div().w_full().h(px(4.)).bg(color)),
             );
@@ -2121,8 +2326,16 @@ impl Studio {
         let Some(file) = rfd::FileDialog::new().set_title("选择 CUE").add_filter("CUE", &["cue"]).pick_file() else {
             return;
         };
-        let files = self.cd_discs.get(index).map(|disc| disc.files.clone()).unwrap_or_default();
-        match cue::parse_disc_cue(&file, &files) {
+        let mut files = Vec::new();
+        for disc in &self.cd_discs {
+            for item in &disc.files {
+                if !files.iter().any(|(_, path)| path == &item.1) {
+                    files.push(item.clone());
+                }
+            }
+        }
+        let prefer = file.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
+        match cue::parse_disc_cue_near(&file, &files, &prefer) {
             Ok((album, rows)) => {
                 if let Some(disc) = self.cd_discs.get_mut(index) {
                     disc.cue_path = file.display().to_string();
@@ -2238,10 +2451,10 @@ impl Studio {
             }
         };
         let mut imported = 0usize;
-        let mut skipped = 0usize;
+        let mut skipped = Vec::new();
         for disc in discs {
             if disc.rows.is_empty() {
-                skipped += 1;
+                skipped.push(format!("碟 {:02}", disc.number));
                 continue;
             }
             let number = disc.number.saturating_add(shift);
@@ -2285,7 +2498,11 @@ impl Studio {
         self.page = super::Page::Split;
         self.overlay = None;
         self.push(window, cx);
-        self.status = format!("已导入 {imported} 条曲目, 跳过 {skipped} 张未配对的碟.").into();
+        self.status = if skipped.is_empty() {
+            format!("已导入 {imported} 条曲目.").into()
+        } else {
+            format!("已导入 {imported} 条曲目. 未导入: {}. 这些碟仍留在 CD 页.", skipped.join(", ")).into()
+        };
         self.mark_dirty(cx);
     }
 
@@ -2544,6 +2761,24 @@ fn file_slot(id: &'static str, name: String, click: impl Fn(&gpui_kit::ClickEven
         .on_click(click)
         .child(div().h(px(34.)).px(px(10.)).bg(rgb(0xf6f4fa)).border_r_1().border_color(rgb(0xdcd7e6)).flex().items_center().text_size(px(13.)).child("选择文件"))
         .child(div().px(px(10.)).text_size(px(13.)).text_color(if name == "未选择任何文件" { rgb(0x66647a) } else { rgb(0x222037) }).child(name))
+}
+
+fn disc_audio_names(disc: &cue::DiscDraft) -> String {
+    let mut names = Vec::new();
+    for row in &disc.rows {
+        let name = if row.source.is_empty() { names::source_leaf(&row.path) } else { row.source.clone() };
+        if !name.is_empty() && !names.iter().any(|item| item == &name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        for (name, _) in &disc.files {
+            if !names.iter().any(|item| item == name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    if names.is_empty() { "无音频".into() } else { names.join(", ") }
 }
 
 fn labeled(label: &'static str, input: &Entity<InputState>) -> gpui_kit::Div {

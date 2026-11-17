@@ -454,6 +454,129 @@ pub fn plan_merge(tracks: &[Track], selected: &[usize], durations: &BTreeMap<Str
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct StitchCut {
+    pub source: String,
+    pub start: f64,
+    pub end: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StitchSlice {
+    pub index: usize,
+    pub source_at: f64,
+    pub seconds: f64,
+    pub virtual_at: f64,
+}
+
+pub fn describe_stitch(parts: &[Segment]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let start = if part.start.trim().is_empty() { "00:00:00".to_string() } else { part.start.trim().to_string() };
+        let end = if part.end.trim().is_empty() { "到文件结束".to_string() } else { part.end.trim().to_string() };
+        let mut line = format!("{start} - {end}  {}", source_leaf(&part.source));
+        if !part.title.trim().is_empty() {
+            line.push_str("  ");
+            line.push_str(part.title.trim());
+        }
+        lines.push(line);
+        let Some(next) = parts.get(index + 1) else {
+            continue;
+        };
+        if next.source != part.source {
+            lines.push("接下一文件".into());
+            continue;
+        }
+        let (Ok(Some(end_at)), Ok(Some(next_at))) = (time_seconds(&part.end), time_seconds(&next.start)) else {
+            continue;
+        };
+        let gap = next_at - end_at;
+        if gap > JOIN_TOLERANCE {
+            lines.push(format!("空隙 {} 不保留", format_seconds(gap)));
+        }
+    }
+    lines
+}
+
+pub fn stitch_cuts(parts: &[Segment]) -> StudioResult<Vec<StitchCut>> {
+    if parts.is_empty() {
+        return Err(StudioError::new("没有可拼接的段落."));
+    }
+    let mut timed = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        if part.source.trim().is_empty() {
+            return Err(StudioError::new(format!("第 {} 段还没有录音.", index + 1)));
+        }
+        let start = time_seconds(&part.start)?.unwrap_or(0.0);
+        let end = time_seconds(&part.end)?;
+        if let Some(end) = end {
+            if end <= start {
+                return Err(StudioError::new(format!("第 {} 段的结束须晚于开始.", index + 1)));
+            }
+        } else if index + 1 != parts.len() {
+            return Err(StudioError::new(format!("第 {} 段缺少终点, 时间轴无法拼接.", index + 1)));
+        }
+        timed.push(StitchCut { source: part.source.clone(), start, end });
+    }
+    let mut collapsed = Vec::new();
+    for cut in timed {
+        let join = collapsed.last().is_some_and(|last: &StitchCut| last.source == cut.source && last.end.is_some_and(|end| (end - cut.start).abs() <= JOIN_TOLERANCE));
+        if join {
+            collapsed.last_mut().unwrap().end = cut.end;
+        } else {
+            collapsed.push(cut);
+        }
+    }
+    Ok(collapsed)
+}
+
+pub fn stitch_queue(spans: &[(f64, Option<f64>)], file_durations: &[Option<f64>], from: f64, limit: Option<f64>) -> StudioResult<(Vec<StitchSlice>, f64)> {
+    let from = if from.is_finite() && from > 0.0 { from } else { 0.0 };
+    let mut lengths = Vec::new();
+    for (index, (start, end)) in spans.iter().enumerate() {
+        let seconds = if let Some(end) = end {
+            if *end <= *start {
+                return Err(StudioError::new(format!("第 {} 段的结束须晚于开始.", index + 1)));
+            }
+            end - start
+        } else if index + 1 != spans.len() {
+            return Err(StudioError::new(format!("第 {} 段缺少终点, 时间轴无法拼接.", index + 1)));
+        } else {
+            let Some(duration) = file_durations.get(index).copied().flatten().filter(|duration| duration.is_finite() && *duration > *start) else {
+                return Err(StudioError::new("读不到录音时长."));
+            };
+            duration - start
+        };
+        lengths.push(seconds);
+    }
+    let total = lengths.iter().sum();
+    if from >= total {
+        return Err(StudioError::new("已经到拼接末尾."));
+    }
+    let budget = limit.filter(|value| value.is_finite() && *value > 0.0).unwrap_or(f64::INFINITY);
+    let mut cursor = 0.0;
+    let mut taken = 0.0;
+    let mut slices = Vec::new();
+    for (index, ((start, _), seconds)) in spans.iter().zip(lengths).enumerate() {
+        let virtual_end = cursor + seconds;
+        if virtual_end <= from {
+            cursor = virtual_end;
+            continue;
+        }
+        let skip = (from - cursor).max(0.0);
+        let take = (seconds - skip).min(budget - taken);
+        if take > 0.0 {
+            slices.push(StitchSlice { index, source_at: start + skip, seconds: take, virtual_at: cursor + skip });
+            taken += take;
+        }
+        cursor = virtual_end;
+        if taken >= budget {
+            break;
+        }
+    }
+    Ok((slices, total))
+}
+
 pub fn shared_title(titles: &[String]) -> String {
     let titles: Vec<&str> = titles.iter().map(|title| title.trim()).filter(|title| !title.is_empty()).collect();
     if titles.is_empty() {
@@ -561,21 +684,32 @@ fn chinese_movement(title: &str) -> Option<(String, u32)> {
     Some((work, ord))
 }
 
+fn chinese_digit(text: char) -> Option<u32> {
+    match text {
+        '一' => Some(1),
+        '二' => Some(2),
+        '三' => Some(3),
+        '四' => Some(4),
+        '五' => Some(5),
+        '六' => Some(6),
+        '七' => Some(7),
+        '八' => Some(8),
+        '九' => Some(9),
+        _ => None,
+    }
+}
+
 fn chinese_number(text: &str) -> Option<u32> {
     if let Ok(number) = text.parse::<u32>() {
-        return (number > 0).then_some(number);
+        return (1..=99).contains(&number).then_some(number);
     }
-    match text {
-        "一" => Some(1),
-        "二" => Some(2),
-        "三" => Some(3),
-        "四" => Some(4),
-        "五" => Some(5),
-        "六" => Some(6),
-        "七" => Some(7),
-        "八" => Some(8),
-        "九" => Some(9),
-        "十" => Some(10),
+    let chars: Vec<char> = text.chars().collect();
+    match chars.as_slice() {
+        ['十'] => Some(10),
+        [digit] => chinese_digit(*digit),
+        ['十', digit] => chinese_digit(*digit).map(|number| 10 + number),
+        [digit, '十'] => chinese_digit(*digit).map(|number| number * 10),
+        [tens, '十', digit] => Some(chinese_digit(*tens)? * 10 + chinese_digit(*digit)?),
         _ => None,
     }
 }
@@ -787,6 +921,40 @@ mod tests {
         assert_eq!(listen_span(5.0, 0.0, None), 0.0);
         assert_eq!(listen_span(110.0, 100.0, Some(20.0)), 0.0);
         assert_eq!(listen_span(f64::NAN, 30.0, None), 30.0);
+    }
+
+    #[test]
+    fn stitch_describes_gaps_and_queues_across_them() {
+        let mut first = Segment { source: "a.wav".into(), start: "00:10:00".into(), end: "00:12:00".into(), title: "I".into() };
+        let second = Segment { source: "a.wav".into(), start: "00:14:00".into(), end: "00:16:00".into(), title: "II".into() };
+        let lines = describe_stitch(&[first.clone(), second.clone()]);
+        assert!(lines.iter().any(|line| line.contains("空隙") && line.contains("不保留")), "{lines:?}");
+        first.end = "00:13:59.960".into();
+        let lines = describe_stitch(&[first, second.clone()]);
+        assert!(lines.iter().all(|line| !line.contains("空隙")), "{lines:?}");
+        let third = Segment { source: "b.wav".into(), start: "00:00:00".into(), end: "00:01:00".into(), title: String::new() };
+        let lines = describe_stitch(&[second, third]);
+        assert!(lines.iter().any(|line| line == "接下一文件"), "{lines:?}");
+        let (slices, total) = stitch_queue(&[(0.0, Some(10.0)), (20.0, Some(30.0))], &[None, None], 8.0, Some(5.0)).unwrap();
+        assert_eq!(total, 20.0);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].source_at, 8.0);
+        assert_eq!(slices[0].seconds, 2.0);
+        assert_eq!(slices[1].source_at, 20.0);
+        assert_eq!(slices[1].seconds, 3.0);
+        assert_eq!(slices[1].virtual_at, 10.0);
+    }
+
+    #[test]
+    fn chinese_movement_numbers_pass_ten() {
+        let mut tracks = vec![Track::blank(), Track::blank(), Track::blank()];
+        tracks[0].tags.title = "奏鸣曲 第十一乐章".into();
+        tracks[1].tags.title = "奏鸣曲 第十二乐章".into();
+        tracks[2].tags.title = "奏鸣曲 第二十一乐章".into();
+        let groups = suggest_movement_groups(&tracks);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].indexes, vec![0, 1, 2]);
+        assert_eq!(groups[0].title, "奏鸣曲");
     }
 
     #[test]

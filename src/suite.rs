@@ -280,7 +280,10 @@ fn titles_and_movement_groups_follow_the_work_not_the_movement() {
     movement[1].tags.title = "第2乐章".into();
     movement[1].source = "other.wav".into();
     assert!(names::suggest_movement_groups(&movement).is_empty());
-    assert!(names::suggest_movement_groups(&titled(&["组曲 第十一乐章", "组曲 第十二乐章"])).is_empty());
+    let teens = names::suggest_movement_groups(&titled(&["组曲 第十一乐章", "组曲 第十二乐章"]));
+    assert_eq!(teens.len(), 1);
+    assert_eq!(teens[0].indexes, vec![0, 1]);
+    assert_eq!(teens[0].title, "组曲");
 }
 
 #[test]
