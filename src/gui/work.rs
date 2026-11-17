@@ -9,7 +9,8 @@ use gpui_kit::component::{
     label::Label,
 };
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _,
     Window, div, px, rgb,
 };
 use gpui_kit::component::input::InputState;
@@ -121,7 +122,7 @@ impl Studio {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().text_size(px(32.)).font_weight(FontWeight::BOLD).line_height(px(38.)).tracking(px(-1.)).child(title))
+                    .child(div().text_size(px(32.)).font_weight(FontWeight::BOLD).line_height(px(38.)).child(title))
                     .child(div().mt(px(10.)).text_color(rgb(0x5c5470)).line_height(px(22.)).child(detail)),
             )
             .child(
