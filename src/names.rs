@@ -703,7 +703,10 @@ mod tests {
             MergePlan::Contiguous { .. } => panic!("a gap must stay segmented"),
         }
         tracks[1].end.clear();
-        assert!(plan_merge(&tracks, &[0, 1], &BTreeMap::new()).is_err());
+        match plan_merge(&tracks, &[0, 1], &BTreeMap::new()).unwrap() {
+            MergePlan::Segments { parts } => assert!(parts[1].end.is_empty()),
+            MergePlan::Contiguous { .. } => panic!("an open ending after a gap stays segmented"),
+        }
         let mut durations = BTreeMap::new();
         durations.insert("sonata.wav".into(), 200.0);
         assert!(plan_merge(&tracks, &[0, 1], &durations).is_ok());

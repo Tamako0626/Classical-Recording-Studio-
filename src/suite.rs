@@ -154,8 +154,9 @@ fn merge_collapses_only_adjacent_touches_and_keeps_titles() {
     match names::plan_merge(&split, &[0, 1, 2], &BTreeMap::new()).unwrap() {
         MergePlan::Segments { parts } => {
             assert_eq!(parts.len(), 3);
+            assert_eq!(parts[0].source, "a.wav");
             assert_eq!(parts[1].source, "b.wav");
-            assert_ne!(parts[0].source, parts[2].source);
+            assert_eq!(parts[2].source, "a.wav");
         }
         MergePlan::Contiguous { .. } => panic!("a foreign middle segment must stay separate"),
     }
@@ -477,7 +478,7 @@ fn export_plan_collapses_touches_splits_gaps_and_names_discs() {
     project.disc_folders = true;
     let plan = export::prepare(&project).unwrap();
     assert_eq!(plan.jobs[0].target, "Disc 01/01-01 - A.flac");
-    assert_eq!(plan.jobs[1].target, "Disc 02/01-01 - A.flac");
+    assert_eq!(plan.jobs[1].target, "Disc 02/02-01 - A.flac");
     assert_eq!(plan.jobs[0].tags.disc, "01");
     assert_eq!(plan.jobs[1].tags.track, "01");
     assert_eq!(plan.jobs[1].tags.total_discs, "02");
