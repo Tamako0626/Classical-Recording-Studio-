@@ -92,6 +92,9 @@ pub fn import_backup(text: &str) -> StudioResult<Workspace> {
         }
     }
     let incoming = parsed.get("data").cloned().unwrap_or(parsed);
+    if !incoming.is_object() {
+        return Err(StudioError::new("备份格式无效，请选择由工作台导出的 JSON。"));
+    }
     serde_json::from_value(incoming).map_err(|_| StudioError::new("备份格式无效，请选择由工作台导出的 JSON。"))
 }
 
