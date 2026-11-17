@@ -10,7 +10,7 @@ use gpui_kit::component::{
     radio::RadioGroup,
     switch::Switch,
 };
-use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px};
+use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px, rgb};
 
 use crate::chrome;
 use crate::catalog;
@@ -263,20 +263,41 @@ impl Studio {
 
     fn track_block(&mut self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.track_index;
-        let mut list = div().flex().flex_col().gap_1();
+        let columns = chrome::split_track_columns();
+        let mut list = div().flex().flex_col().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px(px(8.))
+                .py(px(6.))
+                .bg(rgb(0xf6f4fa))
+                .text_size(px(11.))
+                .text_color(rgb(0x66647a))
+                .child(div().w(px(28.)).child(""))
+                .child(div().w(px(40.)).child(columns[0]))
+                .child(div().flex_1().child(columns[1]))
+                .child(div().w(px(120.)).child(columns[2]))
+                .child(div().w(px(72.)).child(columns[3]))
+                .child(div().w(px(72.)).child(columns[4]))
+                .child(div().w(px(56.)).child(columns[5])),
+        );
         for (index, track) in project.tracks.iter().enumerate() {
             let title = if track.tags.title.trim().is_empty() { "未命名曲目".to_string() } else { track.tags.title.clone() };
             let leaf = if track.source.is_empty() { "未选择".to_string() } else { names::source_leaf(&track.source) };
-            let disc = if track.disc > 0 { format!("D{:02}  ", track.disc) } else { String::new() };
+            let disc = if track.disc > 0 { format!("D{:02} ", track.disc) } else { String::new() };
             let extra = if track.parts.len() > 1 {
                 match names::parts_duration(&track.parts) {
-                    Some(seconds) => format!("  ({} 段, {})", track.parts.len(), names::format_seconds(seconds)),
-                    None => format!("  ({} 段)", track.parts.len()),
+                    Some(seconds) => format!(" ({} 段, {})", track.parts.len(), names::format_seconds(seconds)),
+                    None => format!(" ({} 段)", track.parts.len()),
                 }
             } else {
                 String::new()
             };
-            let label = format!("{disc}{:02}  {leaf}  {} - {title}{extra}", index + 1, track.start);
+            let name = format!("{disc}{title}{extra}");
+            let end = if track.end.trim().is_empty() { "—".to_string() } else { track.end.clone() };
+            let start = track.start.clone();
             let id = track.id.clone();
             let picked = self.track_picks.contains(&index);
             list = list.child(
@@ -285,6 +306,10 @@ impl Studio {
                     .flex_row()
                     .gap_2()
                     .items_center()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(0xede9f3))
                     .child(Checkbox::new(SharedString::from(format!("pick-{id}"))).checked(picked).on_change(cx.listener(move |this, value: &bool, _, cx| {
                         this.pull(cx);
                         if *value {
@@ -294,14 +319,24 @@ impl Studio {
                         }
                         cx.notify();
                     })))
+                    .child(div().w(px(40.)).child(format!("{:02}", index + 1)))
                     .child(
-                        Button::new(SharedString::from(format!("track-{id}")))
-                            .small()
-                            .ghost()
-                            .selected(selected == Some(index))
-                            .label(label)
-                            .on_click(cx.listener(move |this, _, window, cx| this.select_track(index, window, cx))),
-                    ),
+                        div().flex_1().min_w(px(0.)).child(
+                            Button::new(SharedString::from(format!("track-{id}")))
+                                .small()
+                                .ghost()
+                                .selected(selected == Some(index))
+                                .label(name)
+                                .on_click(cx.listener(move |this, _, window, cx| this.select_track(index, window, cx))),
+                        ),
+                    )
+                    .child(div().w(px(120.)).child(leaf))
+                    .child(div().w(px(72.)).child(start))
+                    .child(div().w(px(72.)).child(end))
+                    .child(Button::new(SharedString::from(format!("hear-{id}"))).xsmall().ghost().label("试听").disabled(self.busy).on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_track(index, window, cx);
+                        this.preview(false, cx);
+                    }))),
             );
         }
         let mut editor = div().flex().flex_col().gap_2();
@@ -515,27 +550,49 @@ impl Studio {
 
     pub(super) fn scripts_page(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         let (title, detail) = chrome::heading(chrome::Place::Scripts);
-        let body = match self.project() {
-            Some(project) => match export::prepare(project) {
-                Ok(plan) => chrome::script_preview(&export::describe_plan(&plan)),
-                Err(error) => error.to_string(),
-            },
-            None => chrome::label::SCRIPT_EMPTY.to_string(),
+        let Some(project) = self.project() else {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(div().text_size(px(22.)).child(title))
+                .child(div().text_color(rgb(0x66647a)).child(detail))
+                .child(div().text_color(rgb(0x66647a)).child(chrome::label::SCRIPT_EMPTY))
+                .into_any_element();
         };
-        super::surface().child(Label::new(title)).child(Label::new(detail)).child(Label::new(chrome::label::SCRIPT_CARD)).child(Label::new(body)).into_any_element()
+        let body = match export::prepare(project) {
+            Ok(plan) => chrome::script_preview(&export::describe_plan(&plan)),
+            Err(error) => error.to_string(),
+        };
+        let mut preview = div().p(px(16.)).rounded(px(12.)).bg(rgb(0x211b35)).text_color(rgb(0xf4edff)).flex().flex_col().gap_1();
+        for line in body.lines() {
+            preview = preview.child(if line.is_empty() { " ".to_string() } else { line.to_string() });
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_size(px(22.)).child(title))
+            .child(div().text_color(rgb(0x66647a)).child(detail))
+            .child(super::surface().child(div().text_size(px(16.)).child(chrome::label::SCRIPT_CARD)).child(preview))
+            .into_any_element()
     }
 
     pub(super) fn history_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.project().map(|project| project.id.clone());
-        let mut list = div().flex().flex_col().gap_2();
-        for entry in self.workspace.logs.iter().rev().filter(|entry| current.as_ref().is_none_or(|id| entry.project_id == *id)).take(80) {
-            list = list.child(Label::new(format!("{}  {}  {}  {}  {}", entry.time, entry.project_name, entry.operation, entry.result, entry.message)));
-        }
         let (title, detail) = chrome::heading(chrome::Place::History);
-        super::surface()
-            .child(Label::new(title))
-            .child(Label::new(detail))
-            .child(Label::new("只显示当前项目. 没有打开项目时显示全部."))
+        let mut table = div().flex().flex_col().child(super::history_head());
+        if self.workspace.logs.is_empty() {
+            table = table.child(div().p(px(16.)).text_color(rgb(0x66647a)).child("还没有处理记录。"));
+        }
+        for entry in self.workspace.logs.iter().rev().take(80) {
+            table = table.child(super::history_line(&entry.time, &entry.project_name, &entry.operation, &entry.result, &entry.message));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_size(px(22.)).child(title))
+            .child(div().text_color(rgb(0x66647a)).child(detail))
             .child(Button::new("clear-logs").small().danger().label("清除当前项目的记录").on_click(cx.listener(|this, _, _, cx| {
                 if let Some(id) = this.project().map(|project| project.id.clone()) {
                     this.workspace.logs.retain(|entry| entry.project_id != id);
@@ -544,30 +601,68 @@ impl Studio {
                 }
                 this.mark_dirty(cx);
             })))
-            .child(list)
+            .child(super::surface().child(table))
             .into_any_element()
     }
 
     pub(super) fn templates_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut list = div().flex().flex_col().gap_2();
+        let (title, detail) = chrome::heading(chrome::Place::Templates);
+        let hint = ["Source", "Order"].into_iter().chain(TAG_KEYS).map(|key| format!("{{{key}}}")).collect::<Vec<_>>().join(" · ");
+        let mut list = div().flex().flex_col().gap(px(12.));
         for (index, template) in self.workspace.templates.iter().enumerate() {
             let name = template.name.clone();
+            let rule = template.rule.clone();
+            let output = template.output.clone();
+            let summary = format!("{} · {} Hz · {}", template.settings.format, template.settings.rate, output);
             let id = template.id.clone();
             list = list.child(
-                div().flex().flex_row().gap_2().items_center().child(Label::new(format!("{name}  {}", template.rule))).child(
-                    Button::new(SharedString::from(format!("apply-{id}")))
-                        .small()
-                        .label("应用到当前项目")
-                        .on_click(cx.listener(move |this, _, window, cx| this.apply_template(index, window, cx))),
-                ),
+                div()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0xe5e1ed))
+                    .rounded(px(14.))
+                    .p(px(19.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_size(px(16.)).child(name))
+                    .child(div().text_color(rgb(0x66647a)).child(summary))
+                    .child(div().child(rule))
+                    .child(
+                        Button::new(SharedString::from(format!("apply-{id}")))
+                            .small()
+                            .label("应用到当前项目")
+                            .on_click(cx.listener(move |this, _, window, cx| this.apply_template(index, window, cx))),
+                    ),
             );
         }
-        let (title, detail) = chrome::heading(chrome::Place::Templates);
-        super::surface()
-            .child(Label::new(title))
-            .child(Label::new(detail))
-            .child(Label::new("模板保存格式, 采样率, 增益, 后期, 命名规则和输出文件夹."))
-            .child(Button::new("save-template").primary().label("把当前项目存为模板").on_click(cx.listener(|this, _, _, cx| this.save_template(cx))))
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(div().flex().flex_col().gap(px(6.)).child(div().text_size(px(22.)).child(title)).child(div().text_color(rgb(0x66647a)).child(detail)))
+                    .child(Button::new("save-template").primary().label(chrome::label::NEW_TEMPLATE).on_click(cx.listener(|this, _, _, cx| this.save_template(cx)))),
+            )
+            .child(
+                div()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0xe5e1ed))
+                    .rounded(px(14.))
+                    .p(px(19.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_size(px(16.)).child(chrome::label::NAMING_CARD))
+                    .child(div().child(self.workspace.naming.clone()))
+                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(format!("可用变量 {hint}"))),
+            )
             .child(list)
             .into_any_element()
     }
@@ -768,7 +863,7 @@ impl Studio {
         self.mark_dirty(cx);
     }
 
-    fn cycle_status(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cycle_status(&mut self, cx: &mut Context<Self>) {
         self.pull(cx);
         let Some(project) = self.project_mut() else {
             return;
@@ -1793,7 +1888,7 @@ fn session_form(studio: &Studio) -> impl IntoElement {
     Form::new()
         .child(super::field("场次 / 专辑名", &studio.name))
         .child(super::field("演奏家", &studio.performer))
-        .child(super::field("指挥", &studio.conductor))
+        .child(super::field("指挥家", &studio.conductor))
         .child(super::field("乐团", &studio.orchestra))
         .child(super::field("作曲家", &studio.composer))
         .child(super::field("演出日期", &studio.date))

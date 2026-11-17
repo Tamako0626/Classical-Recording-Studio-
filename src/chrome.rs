@@ -21,7 +21,7 @@ pub fn navigation() -> [Item; 5] {
     [
         Item { id: "nav-projects", mark: "▤", label: "录音项目", place: Place::Projects },
         Item { id: "nav-split", mark: "✂", label: "整场录音分轨", place: Place::Split },
-        Item { id: "nav-scripts", mark: "⌘", label: "脚本生成", place: Place::Scripts },
+        Item { id: "nav-scripts", mark: "›_", label: "脚本生成", place: Place::Scripts },
         Item { id: "nav-history", mark: "◷", label: "处理记录", place: Place::History },
         Item { id: "nav-templates", mark: "▧", label: "模板与命名", place: Place::Templates },
     ]
@@ -90,6 +90,23 @@ pub mod label {
     pub const SYNC: &str = "本机工作区 · 已连接";
     pub const SCRIPT_CARD: &str = "PowerShell 预览";
     pub const SCRIPT_EMPTY: &str = "请先创建录音项目。";
+    pub const BACK_LIST: &str = "← 返回项目列表";
+    pub const EDIT_PROJECT: &str = "编辑项目";
+    pub const OPEN_SPLIT: &str = "在软件中分轨 ↗";
+    pub const OPEN_SCRIPT: &str = "生成脚本 ↗";
+    pub const OPEN_ROW: &str = "打开 ↗";
+    pub const CLEAR_FILTER: &str = "清除筛选";
+    pub const MORE_FILTER: &str = "更多筛选 ▾";
+    pub const EMPTY_PROJECTS: &str = "没有符合条件的录音项目。";
+    pub const NEW_TEMPLATE: &str = "＋ 新建模板";
+    pub const NAMING_CARD: &str = "默认曲目命名规则";
+    pub const SESSION_CARD: &str = "演出与录音";
+    pub const FILES_CARD: &str = "原始文件";
+    pub const AUDIO_CARD: &str = "封面与音频设置";
+}
+
+pub fn project_track_columns() -> [&'static str; 5] {
+    ["顺序", "Title / Composer", "原始文件", "分轨时间", "英文文件名（不含扩展名）"]
 }
 
 pub fn header_tools() -> [&'static str; 4] {
@@ -106,6 +123,100 @@ pub fn removed_from_nav() -> [&'static str; 3] {
 
 pub fn groups() -> [(&'static str, &'static str, &'static str); 4] {
     [("all", "▤", "全部项目"), ("open", "◷", "整理中"), ("complete", "✓", "已完成"), ("repair", "◇", "待修复")]
+}
+
+pub fn project_columns() -> [&'static str; 7] {
+    ["录音项目", "演出日期", "城市 / 音乐厅", "录音来源", "曲目", "状态", "操作"]
+}
+
+pub fn detail_tabs() -> [&'static str; 3] {
+    ["项目概览", "分轨与标签", "项目历史"]
+}
+
+pub fn sorts() -> [(&'static str, &'static str); 4] {
+    [("recent", "日期从近到远"), ("oldest", "日期从远到近"), ("name", "项目名称"), ("manual", "手动顺序")]
+}
+
+pub fn history_columns() -> [&'static str; 5] {
+    ["时间", "项目", "操作", "结果", "详情"]
+}
+
+pub fn split_track_columns() -> [&'static str; 6] {
+    ["顺序", "曲目名称", "音频来源", "起点", "终点", "试听与标签"]
+}
+
+pub fn detail_fields() -> [(&'static str, &'static str); 9] {
+    [
+        ("performer", "演奏家"),
+        ("conductor", "指挥家"),
+        ("composer", "作曲家"),
+        ("date", "演出日期"),
+        ("city", "城市"),
+        ("venue", "音乐厅"),
+        ("origin", "录音来源"),
+        ("status", "项目状态"),
+        ("orchestra", "乐团"),
+    ]
+}
+
+pub struct Listing<'a> {
+    pub name: &'a str,
+    pub performer: &'a str,
+    pub conductor: &'a str,
+    pub composer: &'a str,
+    pub date: &'a str,
+    pub city: &'a str,
+    pub venue: &'a str,
+    pub origin: &'a str,
+    pub status: &'a str,
+    pub extra: &'a str,
+}
+
+pub struct ListingFilter<'a> {
+    pub group: &'a str,
+    pub query: &'a str,
+    pub status: &'a str,
+    pub origin: &'a str,
+    pub date: &'a str,
+    pub performer: &'a str,
+    pub conductor: &'a str,
+    pub composer: &'a str,
+    pub city: &'a str,
+    pub venue: &'a str,
+}
+
+pub fn listing_visible(row: &Listing<'_>, filter: &ListingFilter<'_>) -> bool {
+    if !in_group(row.status, filter.group) {
+        return false;
+    }
+    let exact = [
+        (filter.status, row.status),
+        (filter.origin, row.origin),
+        (filter.date, row.date),
+        (filter.performer, row.performer),
+        (filter.conductor, row.conductor),
+        (filter.city, row.city),
+        (filter.venue, row.venue),
+    ];
+    if exact.iter().any(|(want, have)| !want.is_empty() && *want != *have) {
+        return false;
+    }
+    if !filter.composer.is_empty() {
+        let hit = row.composer.split(" / ").any(|part| part == filter.composer) || row.extra.lines().any(|part| part == filter.composer);
+        if !hit {
+            return false;
+        }
+    }
+    let query = filter.query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let hay = format!(
+        "{} {} {} {} {} {} {} {} {} {}",
+        row.name, row.performer, row.conductor, row.composer, row.date, row.city, row.venue, row.origin, row.status, row.extra
+    )
+    .to_lowercase();
+    hay.contains(&query)
 }
 
 pub fn in_group(status: &str, group: &str) -> bool {
@@ -497,5 +608,94 @@ mod tests {
         for sample in ["", "not-json", "[]", "null", "{\"version\":2,\"data\":{}}", "{\"data\":{}}", "{\"version\":1,\"data\":\"nope\"}", "{\"version\":\"1\",\"data\":{}}"] {
             assert!(store::import_backup(sample).is_err(), "{sample}");
         }
+    }
+
+    #[test]
+    fn original_screen_uses_the_zip_layout() {
+        assert_eq!(navigation()[2].mark, "›_");
+        assert_eq!(
+            project_columns(),
+            ["录音项目", "演出日期", "城市 / 音乐厅", "录音来源", "曲目", "状态", "操作"]
+        );
+        assert_eq!(detail_tabs(), ["项目概览", "分轨与标签", "项目历史"]);
+        assert_eq!(sorts()[3], ("manual", "手动顺序"));
+        assert_eq!(history_columns(), ["时间", "项目", "操作", "结果", "详情"]);
+        assert_eq!(split_track_columns()[0], "顺序");
+        assert_eq!(split_track_columns()[5], "试听与标签");
+        assert_eq!(detail_fields()[1], ("conductor", "指挥家"));
+        assert_eq!(detail_fields()[7], ("status", "项目状态"));
+        assert_eq!(project_track_columns()[1], "Title / Composer");
+        assert_eq!(project_track_columns()[4], "英文文件名（不含扩展名）");
+        assert_eq!(label::BACK_LIST, "← 返回项目列表");
+        assert_eq!(label::OPEN_ROW, "打开 ↗");
+        assert_eq!(label::OPEN_SPLIT, "在软件中分轨 ↗");
+        assert_eq!(label::OPEN_SCRIPT, "生成脚本 ↗");
+        assert_eq!(label::EMPTY_PROJECTS, "没有符合条件的录音项目。");
+        assert_eq!(label::NAMING_CARD, "默认曲目命名规则");
+        assert_eq!(label::SESSION_CARD, "演出与录音");
+    }
+
+    fn sample<'a>(status: &'a str) -> Listing<'a> {
+        Listing {
+            name: "贝多芬",
+            performer: "陈韵集",
+            conductor: "张指挥",
+            composer: "Beethoven / Mozart",
+            date: "2024-05-01",
+            city: "上海",
+            venue: "交响音乐厅",
+            origin: "现场",
+            status,
+            extra: "Piano Sonata\nMozart",
+        }
+    }
+
+    fn open_filter<'a>() -> ListingFilter<'a> {
+        ListingFilter {
+            group: "all",
+            query: "",
+            status: "",
+            origin: "",
+            date: "",
+            performer: "",
+            conductor: "",
+            composer: "",
+            city: "",
+            venue: "",
+        }
+    }
+
+    #[test]
+    fn listing_uses_the_original_groups_and_fields() {
+        let row = sample("整理中");
+        assert!(listing_visible(&row, &open_filter()));
+        let mut grouped = open_filter();
+        grouped.group = "complete";
+        assert!(!listing_visible(&row, &grouped));
+        grouped.group = "open";
+        assert!(listing_visible(&row, &grouped));
+        let mut repair = sample("需修复");
+        grouped.group = "repair";
+        assert!(listing_visible(&repair, &grouped));
+        repair.status = "已完成";
+        assert!(!listing_visible(&repair, &grouped));
+
+        let mut filtered = open_filter();
+        filtered.city = "上海";
+        assert!(listing_visible(&row, &filtered));
+        filtered.city = "北京";
+        assert!(!listing_visible(&row, &filtered));
+        filtered.city = "";
+        filtered.composer = "Mozart";
+        assert!(listing_visible(&row, &filtered));
+        filtered.composer = "Bach";
+        assert!(!listing_visible(&row, &filtered));
+        filtered.composer = "";
+        filtered.query = "piano";
+        assert!(listing_visible(&row, &filtered));
+        filtered.query = "不存在";
+        assert!(!listing_visible(&row, &filtered));
+        filtered.query = "  ";
+        assert!(listing_visible(&row, &filtered));
     }
 }

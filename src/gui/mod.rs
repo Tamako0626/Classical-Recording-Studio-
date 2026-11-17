@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    form::Field,
+    form::{Field, Form},
     input::{Input, InputEvent, InputState},
     Theme,
 };
@@ -44,6 +44,13 @@ enum Overlay {
     Llm,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailTab {
+    Overview,
+    Tracks,
+    History,
+}
+
 fn page_from(place: chrome::Place) -> Page {
     match place {
         chrome::Place::Projects => Page::Projects,
@@ -68,6 +75,19 @@ pub struct Studio {
     page: Page,
     overlay: Option<Overlay>,
     project_group: &'static str,
+    detail: bool,
+    detail_tab: DetailTab,
+    sort_key: &'static str,
+    more_filters: bool,
+    filter_query: Entity<InputState>,
+    filter_status: String,
+    filter_origin: String,
+    filter_date: String,
+    filter_performer: String,
+    filter_conductor: String,
+    filter_composer: String,
+    filter_city: String,
+    filter_venue: String,
     playhead: f64,
     playing: bool,
     project_index: Option<usize>,
@@ -206,6 +226,7 @@ impl Studio {
         let cd_row_composer = input("作曲家", cx);
         let cd_row_file = input("文件名, 不含扩展名", cx);
         let mb_query = input("曲名, 作品号", cx);
+        let filter_query = input("项目、人物、曲目或文件名", cx);
         drop(input);
         let llm = store::load_llm();
         let llm_base = cx.new(|cx| InputState::new(window, cx).placeholder("https://api.deepseek.com").default_value(llm.base_url.clone()));
@@ -257,6 +278,11 @@ impl Studio {
                 }
             }));
         }
+        subscriptions.push(cx.subscribe_in(&filter_query, window, |_, _, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
         let workspace = store::load_workspace();
         let project_index = if workspace.projects.is_empty() { None } else { Some(0) };
         let track_index = project_index.and_then(|index| workspace.projects.get(index).and_then(|project| if project.tracks.is_empty() { None } else { Some(0) }));
@@ -272,6 +298,19 @@ impl Studio {
             page: Page::Projects,
             overlay: None,
             project_group: "all",
+            detail: false,
+            detail_tab: DetailTab::Overview,
+            sort_key: "recent",
+            more_filters: false,
+            filter_query,
+            filter_status: String::new(),
+            filter_origin: String::new(),
+            filter_date: String::new(),
+            filter_performer: String::new(),
+            filter_conductor: String::new(),
+            filter_composer: String::new(),
+            filter_city: String::new(),
+            filter_venue: String::new(),
             playhead: 0.0,
             playing: false,
             project_index,
@@ -544,6 +583,20 @@ impl Studio {
         self.track_picks.clear();
         self.track_index = self.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
         self.page = Page::Split;
+        self.detail = false;
+        self.overlay = None;
+        self.push(window, cx);
+        cx.notify();
+    }
+
+    fn open_detail(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        self.project_index = Some(index);
+        self.track_picks.clear();
+        self.track_index = self.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
+        self.detail = true;
+        self.detail_tab = DetailTab::Overview;
+        self.page = Page::Projects;
         self.overlay = None;
         self.push(window, cx);
         cx.notify();
@@ -689,6 +742,7 @@ impl Studio {
         self.track_picks.clear();
         self.overlay = None;
         self.page = Page::Projects;
+        self.detail = false;
         self.project_group = "all";
         self.push(window, cx);
         self.status = "已导入备份.".into();
@@ -711,6 +765,9 @@ impl Studio {
                 this.pull(cx);
                 this.page = page;
                 this.overlay = None;
+                if page == Page::Projects {
+                    this.detail = false;
+                }
                 cx.notify();
             }));
         if selected {
@@ -719,74 +776,56 @@ impl Studio {
         item.child(div().w(px(19.)).text_color(rgb(0xc6afff)).child(mark)).child(label).into_any_element()
     }
 
-    fn projects_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn projects_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if self.detail && self.project().is_some() {
+            self.project_detail(window, cx)
+        } else {
+            self.project_board(window, cx)
+        }
+    }
+
+    fn project_board(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let total = self.workspace.projects.len();
         let open = self.workspace.projects.iter().filter(|project| chrome::in_group(&project.status, "open")).count();
         let done = self.workspace.projects.iter().filter(|project| chrome::in_group(&project.status, "complete")).count();
         let repair = self.workspace.projects.iter().filter(|project| chrome::in_group(&project.status, "repair")).count();
-        let mut rows = div().flex().flex_col();
-        if self.workspace.projects.is_empty() {
-            rows = rows.child(div().p(px(28.)).text_color(rgb(0x66647a)).child("还没有录音项目."));
+        let listed = self.listed_projects(cx);
+        let shown = listed.len();
+        let manual = self.sort_key == "manual";
+        let mut rows = div().flex().flex_col().child(project_head());
+        if listed.is_empty() {
+            rows = rows.child(div().p(px(28.)).text_color(rgb(0x66647a)).child(chrome::label::EMPTY_PROJECTS));
         }
-        for index in 0..self.workspace.projects.len() {
-            let project = &self.workspace.projects[index];
-            if !chrome::in_group(&project.status, self.project_group) {
-                continue;
-            }
-            let id = project.id.clone();
-            let title = if project.name.trim().is_empty() { "未命名项目".to_string() } else { project.name.clone() };
-            let mark = title.chars().next().unwrap_or('项').to_string();
-            let place = [project.date.as_str(), project.city.as_str(), project.venue.as_str()]
-                .into_iter()
-                .filter(|item| !item.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let meta = if place.is_empty() {
-                format!("{} 个文件", project.sources.len())
-            } else {
-                format!("{place}  ·  {} 个文件", project.sources.len())
-            };
-            let status = project.status.clone();
-            let last = index + 1 == total;
-            rows = rows.child(
-                div()
-                    .px(px(19.))
-                    .py(px(11.))
-                    .border_t_1()
-                    .border_color(rgb(0xede9f3))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .w(px(34.))
-                            .h(px(34.))
-                            .rounded(px(8.))
-                            .bg(rgb(0xeee6fb))
-                            .text_color(rgb(0x6446a1))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(mark),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.))
-                            .child(title)
-                            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(meta)),
-                    )
-                    .child(status_badge(&status))
-                    .child(Button::new(SharedString::from(format!("open-{id}"))).small().label("打开").on_click(cx.listener(move |this, _, window, cx| this.select_project(index, window, cx))))
-                    .child(Button::new(SharedString::from(format!("up-{id}"))).xsmall().ghost().label("上移").disabled(index == 0).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, -1, window, cx))))
-                    .child(Button::new(SharedString::from(format!("down-{id}"))).xsmall().ghost().label("下移").disabled(last).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, 1, window, cx))))
-                    .child(Button::new(SharedString::from(format!("del-{id}"))).xsmall().ghost().danger().label("删除").on_click(cx.listener(move |this, _, window, cx| this.delete_project(index, window, cx)))),
-            );
+        for index in listed {
+            rows = rows.child(self.project_row(index, total, manual, cx));
         }
+        let mut filters = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Form::new().child(field("搜索项目", &self.filter_query)))
+            .child(self.filter_line("status", "项目状态", cx))
+            .child(self.filter_line("origin", "录音来源", cx))
+            .child(self.filter_line("date", "演出日期", cx));
+        if self.more_filters {
+            filters = filters
+                .child(self.filter_line("performer", "演奏家", cx))
+                .child(self.filter_line("conductor", "指挥家", cx))
+                .child(self.filter_line("composer", "作曲家", cx))
+                .child(self.filter_line("city", "城市", cx))
+                .child(self.filter_line("venue", "音乐厅", cx));
+        }
+        filters = filters.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(Button::new("more-filters").small().ghost().label(chrome::label::MORE_FILTER).on_click(cx.listener(|this, _, _, cx| {
+                    this.more_filters = !this.more_filters;
+                    cx.notify();
+                })))
+                .child(Button::new("clear-filters").small().ghost().label(chrome::label::CLEAR_FILTER).on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx)))),
+        );
         div()
             .flex()
             .flex_col()
@@ -811,13 +850,7 @@ impl Studio {
                             .child(div().text_size(px(28.)).child(chrome::heading(chrome::Place::Projects).0))
                             .child(div().text_color(rgb(0x5c5470)).child(chrome::heading(chrome::Place::Projects).1)),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .child(Button::new("open-file").label(chrome::label::OPEN_PROJECT).on_click(cx.listener(|this, _, window, cx| this.open_file(window, cx)))),
-                    ),
+                    .child(div().flex().flex_row().gap_2().child(Button::new("open-file").label(chrome::label::OPEN_PROJECT).on_click(cx.listener(|this, _, window, cx| this.open_file(window, cx))))),
             )
             .child(
                 div()
@@ -829,6 +862,7 @@ impl Studio {
                     .child(stat_card(done, "complete", "已完成", "✓", self.project_group == "complete", cx))
                     .child(stat_card(repair, "repair", "待修复", "◇", self.project_group == "repair", cx)),
             )
+            .child(div().bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.)).p(px(19.)).flex().flex_col().gap_2().child(filters))
             .child(
                 div()
                     .bg(rgb(0xffffff))
@@ -845,21 +879,469 @@ impl Studio {
                             .flex_row()
                             .items_center()
                             .justify_between()
+                            .gap_2()
                             .child(div().text_size(px(16.)).child("项目列表"))
-                            .child(Button::new("save-file").label(chrome::label::SAVE_LOCAL).on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx))))
-                            .child(Button::new("new-project").primary().label(chrome::label::NEW_PROJECT).on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx)))),
+                            .child(div().flex().flex_row().items_center().gap_2().child(self.sort_bar(cx)).child(Button::new("new-project").primary().label(chrome::label::NEW_PROJECT).on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx))))),
                     )
                     .child(rows)
-                    .child(div().px(px(19.)).py(px(11.)).border_t_1().border_color(rgb(0xede9f3)).text_size(px(11.)).text_color(rgb(0x66647a)).child("删除项目只移出工作台, 不删除磁盘上的录音和导出文件.")),
+                    .child(div().px(px(19.)).py(px(11.)).border_t_1().border_color(rgb(0xede9f3)).text_size(px(11.)).text_color(rgb(0x66647a)).child(format!("显示 {shown} / {total} 个项目"))),
             )
     }
+
+    fn project_detail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let project = self.project().cloned().expect("opened project");
+        let index = self.project_index.expect("opened project");
+        let title = if project.name.trim().is_empty() { "未命名项目".to_string() } else { project.name.clone() };
+        let place = [project.date.as_str(), project.city.as_str(), project.venue.as_str()].into_iter().filter(|item| !item.trim().is_empty()).collect::<Vec<_>>().join(" · ");
+        let subtitle = if place.is_empty() { "—".to_string() } else { place };
+        let body = match self.detail_tab {
+            DetailTab::Overview => self.overview_cards(&project, cx),
+            DetailTab::Tracks => self.track_table(&project, cx),
+            DetailTab::History => self.project_history(&project),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(Button::new("back-projects").small().ghost().label(chrome::label::BACK_LIST).on_click(cx.listener(|this, _, _, cx| {
+                this.pull(cx);
+                this.detail = false;
+                this.mark_dirty(cx);
+            })))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(div().flex().flex_col().gap(px(6.)).child(div().text_size(px(28.)).child(title)).child(div().text_color(rgb(0x66647a)).child(subtitle)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(Button::new("detail-save").label(chrome::label::SAVE_LOCAL).on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx))))
+                            .child(Button::new("detail-edit").label(chrome::label::EDIT_PROJECT).on_click(cx.listener(|this, _, _, cx| {
+                                this.detail_tab = DetailTab::Overview;
+                                cx.notify();
+                            })))
+                            .child(Button::new("detail-split").label(chrome::label::OPEN_SPLIT).on_click(cx.listener(move |this, _, window, cx| this.select_project(index, window, cx))))
+                            .child(Button::new("detail-script").primary().label(chrome::label::OPEN_SCRIPT).on_click(cx.listener(|this, _, _, cx| {
+                                this.pull(cx);
+                                this.page = Page::Scripts;
+                                this.overlay = None;
+                                cx.notify();
+                            }))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(self.detail_tab_button(DetailTab::Overview, chrome::detail_tabs()[0], cx))
+                    .child(self.detail_tab_button(DetailTab::Tracks, chrome::detail_tabs()[1], cx))
+                    .child(self.detail_tab_button(DetailTab::History, chrome::detail_tabs()[2], cx)),
+            )
+            .child(body)
+    }
+
+    fn project_row(&self, index: usize, total: usize, manual: bool, cx: &mut Context<Self>) -> Div {
+        let project = &self.workspace.projects[index];
+        let id = project.id.clone();
+        let title = if project.name.trim().is_empty() { "未命名项目".to_string() } else { project.name.clone() };
+        let mark = project.performer.chars().next().or_else(|| project.conductor.chars().next()).or_else(|| project.name.chars().next()).unwrap_or('项').to_string();
+        let people = {
+            let joined = [project.performer.as_str(), project.conductor.as_str()].into_iter().filter(|item| !item.trim().is_empty()).collect::<Vec<_>>().join(" · ");
+            if joined.is_empty() { project.composer.clone() } else { joined }
+        };
+        let place = {
+            let joined = [project.city.as_str(), project.venue.as_str()].into_iter().filter(|item| !item.trim().is_empty()).collect::<Vec<_>>().join(" · ");
+            if joined.is_empty() { "—".to_string() } else { joined }
+        };
+        let date = if project.date.trim().is_empty() { "—".to_string() } else { project.date.clone() };
+        let origin = if project.origin.trim().is_empty() { "—".to_string() } else { project.origin.clone() };
+        let count = project.tracks.iter().filter(|track| !track.tags.title.trim().is_empty() || !track.source.trim().is_empty()).count();
+        let status = project.status.clone();
+        let last = index + 1 == total;
+        let mut actions = div().flex().flex_row().gap_1().items_center();
+        actions = actions.child(Button::new(SharedString::from(format!("open-{id}"))).xsmall().label(chrome::label::OPEN_ROW).on_click(cx.listener(move |this, _, window, cx| this.open_detail(index, window, cx))));
+        if manual {
+            actions = actions
+                .child(Button::new(SharedString::from(format!("up-{id}"))).xsmall().ghost().label("上移").disabled(index == 0).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, -1, window, cx))))
+                .child(Button::new(SharedString::from(format!("down-{id}"))).xsmall().ghost().label("下移").disabled(last).on_click(cx.listener(move |this, _, window, cx| this.move_project(index, 1, window, cx))));
+        }
+        actions = actions.child(Button::new(SharedString::from(format!("del-{id}"))).xsmall().ghost().danger().label("删除").on_click(cx.listener(move |this, _, window, cx| this.delete_project(index, window, cx))));
+        div()
+            .px(px(19.))
+            .py(px(10.))
+            .border_t_1()
+            .border_color(rgb(0xede9f3))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .w(px(34.))
+                            .h(px(34.))
+                            .rounded(px(8.))
+                            .bg(rgb(0xeee6fb))
+                            .text_color(rgb(0x6446a1))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(mark),
+                    )
+                    .child(div().flex().flex_col().gap(px(3.)).child(title).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(people))),
+            )
+            .child(div().w(px(110.)).child(date))
+            .child(div().w(px(150.)).child(place))
+            .child(div().w(px(90.)).child(origin))
+            .child(div().w(px(48.)).child(count.to_string()))
+            .child(div().w(px(88.)).child(status_badge(&status)))
+            .child(actions)
+    }
+
+    fn sort_bar(&self, cx: &mut Context<Self>) -> Div {
+        let mut row = div().flex().flex_row().gap_1();
+        for (key, label) in chrome::sorts() {
+            let selected = self.sort_key == key;
+            row = if selected {
+                row.child(Button::new(SharedString::from(format!("sort-{key}"))).xsmall().primary().label(label).on_click(cx.listener(move |this, _, _, cx| {
+                    this.sort_key = key;
+                    cx.notify();
+                })))
+            } else {
+                row.child(Button::new(SharedString::from(format!("sort-{key}"))).xsmall().ghost().label(label).on_click(cx.listener(move |this, _, _, cx| {
+                    this.sort_key = key;
+                    cx.notify();
+                })))
+            };
+        }
+        row
+    }
+
+    fn detail_tab_button(&self, tab: DetailTab, label: &'static str, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let selected = self.detail_tab == tab;
+        let id = match tab {
+            DetailTab::Overview => "tab-overview",
+            DetailTab::Tracks => "tab-tracks",
+            DetailTab::History => "tab-history",
+        };
+        if selected {
+            Button::new(id).small().primary().label(label).on_click(cx.listener(move |this, _, _, cx| {
+                this.detail_tab = tab;
+                cx.notify();
+            })).into_any_element()
+        } else {
+            Button::new(id).small().ghost().label(label).on_click(cx.listener(move |this, _, _, cx| {
+                this.detail_tab = tab;
+                cx.notify();
+            })).into_any_element()
+        }
+    }
+
+    fn overview_cards(&mut self, project: &Project, cx: &mut Context<Self>) -> Div {
+        let mut files = div().flex().flex_col().gap_1();
+        if project.sources.is_empty() {
+            files = files.child(div().text_color(rgb(0x66647a)).child("还没有原始文件。"));
+        } else {
+            for source in &project.sources {
+                files = files.child(crate::names::source_leaf(source));
+            }
+        }
+        let audio = format!(
+            "{} · {} Hz · 增益 {} · 声场 {} · 混响 {} · {}",
+            project.settings.format,
+            project.settings.rate,
+            fmt_num(project.settings.gain),
+            fmt_num(project.settings.width),
+            fmt_num(project.settings.reverb),
+            if project.cover_file.trim().is_empty() { "未选择封面".to_string() } else { project.cover_file.clone() }
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                info_card(chrome::label::SESSION_CARD)
+                    .child(
+                        div().flex().flex_row().items_center().gap_2().child(status_badge(&project.status)).child(
+                            Button::new("cycle-project-status").xsmall().ghost().label("切换状态").on_click(cx.listener(|this, _, _, cx| this.cycle_status(cx))),
+                        ),
+                    )
+                    .child(
+                        Form::new()
+                            .child(field("场次 / 专辑名", &self.name))
+                            .child(field("演奏家", &self.performer))
+                            .child(field("指挥家", &self.conductor))
+                            .child(field("乐团", &self.orchestra))
+                            .child(field("作曲家", &self.composer))
+                            .child(field("演出日期", &self.date))
+                            .child(field("专辑标签日期 / 年份（CD）", &self.album_date))
+                            .child(field("城市", &self.city))
+                            .child(field("音乐厅", &self.venue))
+                            .child(field("录音来源", &self.origin)),
+                    ),
+            )
+            .child(info_card(chrome::label::FILES_CARD).child(files))
+            .child(info_card(chrome::label::AUDIO_CARD).child(audio))
+    }
+
+    fn track_table(&self, project: &Project, cx: &mut Context<Self>) -> Div {
+        let columns = chrome::project_track_columns();
+        let rule = if project.naming_rule.trim().is_empty() { crate::names::DEFAULT_NAMING } else { project.naming_rule.as_str() };
+        let mut table = div().flex().flex_col().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px(px(8.))
+                .py(px(8.))
+                .bg(rgb(0xf6f4fa))
+                .text_size(px(11.))
+                .text_color(rgb(0x66647a))
+                .child(div().w(px(48.)).child(columns[0]))
+                .child(div().flex_1().child(columns[1]))
+                .child(div().w(px(140.)).child(columns[2]))
+                .child(div().w(px(120.)).child(columns[3]))
+                .child(div().flex_1().child(columns[4])),
+        );
+        for (index, track) in project.tracks.iter().enumerate() {
+            let title = if track.tags.title.trim().is_empty() { "未命名曲目".to_string() } else { track.tags.title.clone() };
+            let composer = track.tags.composer.clone();
+            let source = if track.source.trim().is_empty() { "—".to_string() } else { crate::names::source_leaf(&track.source) };
+            let span = if track.end.trim().is_empty() { track.start.clone() } else { format!("{} – {}", track.start, track.end) };
+            let filename = crate::names::filename_for(rule, track, &track.tags, index);
+            let last = index + 1 == project.tracks.len();
+            let id = track.id.clone();
+            table = table.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px(px(8.))
+                    .py(px(8.))
+                    .border_t_1()
+                    .border_color(rgb(0xede9f3))
+                    .child(div().w(px(48.)).child(format!("{:02}", index + 1)))
+                    .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.)).child(title).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(composer)))
+                    .child(div().w(px(140.)).child(source))
+                    .child(div().w(px(120.)).child(span))
+                    .child(div().flex_1().min_w(px(0.)).child(filename))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(Button::new(SharedString::from(format!("edit-track-{id}"))).xsmall().label("编辑").on_click(cx.listener(move |this, _, window, cx| this.edit_track(index, window, cx))))
+                            .child(Button::new(SharedString::from(format!("track-up-{id}"))).xsmall().ghost().label("↑").disabled(index == 0).on_click(cx.listener(move |this, _, window, cx| this.move_track(index, -1, window, cx))))
+                            .child(Button::new(SharedString::from(format!("track-down-{id}"))).xsmall().ghost().label("↓").disabled(last).on_click(cx.listener(move |this, _, window, cx| this.move_track(index, 1, window, cx)))),
+                    ),
+            );
+        }
+        info_card(chrome::detail_tabs()[1]).child(table)
+    }
+
+    fn project_history(&self, project: &Project) -> Div {
+        let mut table = div().flex().flex_col().child(history_head());
+        let mut any = false;
+        for entry in self.workspace.logs.iter().rev().filter(|entry| entry.project_id == project.id).take(80) {
+            any = true;
+            table = table.child(history_line(&entry.time, &entry.project_name, &entry.operation, &entry.result, &entry.message));
+        }
+        if !any {
+            table = table.child(div().p(px(16.)).text_color(rgb(0x66647a)).child("还没有处理记录。"));
+        }
+        info_card(chrome::detail_tabs()[2]).child(table)
+    }
+
+    fn listed_projects(&self, cx: &mut Context<Self>) -> Vec<usize> {
+        let query = text(&self.filter_query, cx);
+        let filter = chrome::ListingFilter {
+            group: self.project_group,
+            query: &query,
+            status: &self.filter_status,
+            origin: &self.filter_origin,
+            date: &self.filter_date,
+            performer: &self.filter_performer,
+            conductor: &self.filter_conductor,
+            composer: &self.filter_composer,
+            city: &self.filter_city,
+            venue: &self.filter_venue,
+        };
+        let mut rows = Vec::new();
+        for (index, project) in self.workspace.projects.iter().enumerate() {
+            let extra = listing_extra(project);
+            let row = chrome::Listing {
+                name: &project.name,
+                performer: &project.performer,
+                conductor: &project.conductor,
+                composer: &project.composer,
+                date: &project.date,
+                city: &project.city,
+                venue: &project.venue,
+                origin: &project.origin,
+                status: &project.status,
+                extra: &extra,
+            };
+            if chrome::listing_visible(&row, &filter) {
+                rows.push(index);
+            }
+        }
+        match self.sort_key {
+            "oldest" => rows.sort_by(|&left, &right| oldest_key(&self.workspace.projects[left].date).cmp(&oldest_key(&self.workspace.projects[right].date))),
+            "name" => rows.sort_by(|&left, &right| self.workspace.projects[left].name.cmp(&self.workspace.projects[right].name)),
+            "manual" => {}
+            _ => rows.sort_by(|&left, &right| self.workspace.projects[right].date.cmp(&self.workspace.projects[left].date)),
+        }
+        rows
+    }
+
+    fn filter_line(&self, key: &'static str, title: &'static str, cx: &mut Context<Self>) -> Div {
+        let current = self.filter_value(key);
+        let values = self.values_of(key);
+        let mut chips = div().flex().flex_row().gap_1().items_center();
+        chips = if current.is_empty() {
+            chips.child(Button::new(SharedString::from(format!("filter-{key}-all"))).xsmall().primary().label("全部").on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, String::new(), cx))))
+        } else {
+            chips.child(Button::new(SharedString::from(format!("filter-{key}-all"))).xsmall().ghost().label("全部").on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, String::new(), cx))))
+        };
+        for (index, value) in values.into_iter().enumerate() {
+            let picked = current == value;
+            let label = value.clone();
+            chips = if picked {
+                let chosen = value.clone();
+                chips.child(Button::new(SharedString::from(format!("filter-{key}-{index}"))).xsmall().primary().label(label.clone()).on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, chosen, cx))))
+            } else {
+                let chosen = value;
+                chips.child(Button::new(SharedString::from(format!("filter-{key}-{index}"))).xsmall().ghost().label(label).on_click(cx.listener(move |this, _, _, cx| this.set_filter(key, chosen, cx))))
+            };
+        }
+        div().flex().flex_col().gap_1().child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(title)).child(chips)
+    }
+
+    fn filter_value(&self, key: &str) -> String {
+        match key {
+            "status" => self.filter_status.clone(),
+            "origin" => self.filter_origin.clone(),
+            "date" => self.filter_date.clone(),
+            "performer" => self.filter_performer.clone(),
+            "conductor" => self.filter_conductor.clone(),
+            "composer" => self.filter_composer.clone(),
+            "city" => self.filter_city.clone(),
+            "venue" => self.filter_venue.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn values_of(&self, key: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for project in &self.workspace.projects {
+            match key {
+                "status" => push_unique(&mut out, &project.status),
+                "origin" => push_unique(&mut out, &project.origin),
+                "date" => push_unique(&mut out, &project.date),
+                "performer" => push_unique(&mut out, &project.performer),
+                "conductor" => push_unique(&mut out, &project.conductor),
+                "composer" => {
+                    for part in project.composer.split(" / ") {
+                        push_unique(&mut out, part);
+                    }
+                    for track in &project.tracks {
+                        push_unique(&mut out, &track.tags.composer);
+                    }
+                }
+                "city" => push_unique(&mut out, &project.city),
+                "venue" => push_unique(&mut out, &project.venue),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn set_filter(&mut self, key: &'static str, value: String, cx: &mut Context<Self>) {
+        let slot = match key {
+            "status" => &mut self.filter_status,
+            "origin" => &mut self.filter_origin,
+            "date" => &mut self.filter_date,
+            "performer" => &mut self.filter_performer,
+            "conductor" => &mut self.filter_conductor,
+            "composer" => &mut self.filter_composer,
+            "city" => &mut self.filter_city,
+            "venue" => &mut self.filter_venue,
+            _ => return,
+        };
+        if value.is_empty() || *slot == value {
+            slot.clear();
+        } else {
+            *slot = value;
+        }
+        cx.notify();
+    }
+
+    fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_status.clear();
+        self.filter_origin.clear();
+        self.filter_date.clear();
+        self.filter_performer.clear();
+        self.filter_conductor.clear();
+        self.filter_composer.clear();
+        self.filter_city.clear();
+        self.filter_venue.clear();
+        set_text(&self.filter_query, "", window, cx);
+        cx.notify();
+    }
+
+    fn edit_track(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        self.track_index = Some(index);
+        if let Some(track) = self.project().and_then(|project| project.tracks.get(index)) {
+            self.playhead = crate::names::time_seconds(&track.start).ok().flatten().unwrap_or(0.0);
+        }
+        self.playing = false;
+        self.detail = false;
+        self.page = Page::Split;
+        self.overlay = None;
+        self.push(window, cx);
+        cx.notify();
+    }
+
+    fn move_track(&mut self, index: usize, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project_mut() else { return };
+        let next = index as isize + delta;
+        if next < 0 || next as usize >= project.tracks.len() {
+            return;
+        }
+        project.tracks.swap(index, next as usize);
+        self.track_index = Some(next as usize);
+        self.push(window, cx);
+        self.mark_dirty(cx);
+    }
+
 
     fn create_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         self.workspace.projects.push(Project::blank());
         self.project_index = Some(self.workspace.projects.len() - 1);
         self.track_index = Some(0);
-        self.page = Page::Split;
+        self.track_picks.clear();
+        self.detail = true;
+        self.detail_tab = DetailTab::Overview;
+        self.page = Page::Projects;
         self.overlay = None;
         self.push(window, cx);
         self.mark_dirty(cx);
@@ -892,6 +1374,7 @@ impl Studio {
             self.project_index = Some(self.workspace.projects.len() - 1);
             self.track_index = Some(0);
         }
+        self.detail = false;
         self.push(window, cx);
         self.mark_dirty(cx);
     }
@@ -912,18 +1395,15 @@ impl Studio {
         match crate::model::import_project(&mut self.workspace, file) {
             crate::model::ProjectImport::Existing => {
                 let index = self.workspace.projects.iter().position(|project| project.id == source_id).unwrap_or(0);
-                self.select_project(index, window, cx);
+                self.open_detail(index, window, cx);
                 self.status = "已打开现有项目.".into();
                 return;
             }
             crate::model::ProjectImport::Copy => self.status = "已作为副本打开项目文件.".into(),
             crate::model::ProjectImport::New => self.status = "已打开项目文件.".into(),
         }
-        self.project_index = Some(self.workspace.projects.len() - 1);
-        self.track_index = Some(0);
-        self.page = Page::Split;
-        self.overlay = None;
-        self.push(window, cx);
+        let index = self.workspace.projects.len() - 1;
+        self.open_detail(index, window, cx);
         self.mark_dirty(cx);
     }
 
@@ -1193,6 +1673,98 @@ pub(super) fn surface() -> Div {
     div().bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.)).p(px(19.)).flex().flex_col().gap_2()
 }
 
+
+fn info_card(title: &str) -> Div {
+    div().bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.)).p(px(19.)).flex().flex_col().gap_2().child(div().text_size(px(16.)).child(title.to_string()))
+}
+
+fn project_head() -> Div {
+    let columns = chrome::project_columns();
+    div()
+        .px(px(19.))
+        .py(px(8.))
+        .bg(rgb(0xf6f4fa))
+        .text_size(px(11.))
+        .text_color(rgb(0x66647a))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .child(div().flex_1().child(columns[0]))
+        .child(div().w(px(110.)).child(columns[1]))
+        .child(div().w(px(150.)).child(columns[2]))
+        .child(div().w(px(90.)).child(columns[3]))
+        .child(div().w(px(48.)).child(columns[4]))
+        .child(div().w(px(88.)).child(columns[5]))
+        .child(div().min_w(px(120.)).child(columns[6]))
+}
+
+pub(super) fn history_head() -> Div {
+    let columns = chrome::history_columns();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(8.))
+        .bg(rgb(0xf6f4fa))
+        .text_size(px(11.))
+        .text_color(rgb(0x66647a))
+        .child(div().w(px(140.)).child(columns[0]))
+        .child(div().flex_1().child(columns[1]))
+        .child(div().w(px(110.)).child(columns[2]))
+        .child(div().w(px(80.)).child(columns[3]))
+        .child(div().flex_1().child(columns[4]))
+}
+
+pub(super) fn history_line(time: &str, project: &str, operation: &str, result: &str, message: &str) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(8.))
+        .border_t_1()
+        .border_color(rgb(0xede9f3))
+        .child(div().w(px(140.)).child(time.to_string()))
+        .child(div().flex_1().min_w(px(0.)).child(project.to_string()))
+        .child(div().w(px(110.)).child(operation.to_string()))
+        .child(div().w(px(80.)).child(result.to_string()))
+        .child(div().flex_1().min_w(px(0.)).child(message.to_string()))
+}
+
+fn listing_extra(project: &Project) -> String {
+    let mut parts = Vec::new();
+    for source in &project.sources {
+        parts.push(crate::names::source_leaf(source));
+    }
+    for track in &project.tracks {
+        if !track.tags.title.trim().is_empty() {
+            parts.push(track.tags.title.clone());
+        }
+        if !track.tags.composer.trim().is_empty() {
+            parts.push(track.tags.composer.clone());
+        }
+        if !track.filename.trim().is_empty() {
+            parts.push(track.filename.clone());
+        }
+    }
+    parts.join("\n")
+}
+
+fn oldest_key(date: &str) -> String {
+    if date.trim().is_empty() { "9999".into() } else { date.to_string() }
+}
+
+fn push_unique(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || out.iter().any(|item| item == value) {
+        return;
+    }
+    out.push(value.to_string());
+}
 
 fn stat_card(value: usize, group: &'static str, label: &'static str, mark: &'static str, selected: bool, cx: &mut Context<Studio>) -> impl IntoElement {
     div()
