@@ -136,6 +136,7 @@ pub struct Studio {
     fade_out: Entity<InputState>,
     limiter: Entity<InputState>,
     effects_open: bool,
+    tags_open: bool,
     cd_cue: bool,
     cd_files: Vec<(String, String)>,
     cd_rows: Vec<cue::CueTrack>,
@@ -177,22 +178,22 @@ impl Studio {
         let conductor = input("指挥", cx);
         let orchestra = input("乐团", cx);
         let composer = input("作曲家", cx);
-        let date = input("演出日期", cx);
-        let album_date = input("专辑标签日期", cx);
+        let date = input("年/月/日", cx);
+        let album_date = input("专辑标签日期 / 年份 (CD)", cx);
         let city = input("城市", cx);
         let venue = input("音乐厅", cx);
-        let origin = input("录音来源", cx);
+        let origin = input("现场自录", cx);
         let output = input("留空则按场次命名", cx);
         let naming = input("{Track} - {Title}", cx);
         let notes = input("备注", cx);
         let start = input("00:00", cx);
-        let end = input("留空到文件结束", cx);
-        let filename = input("留空则用命名规则", cx);
+        let end = input("自动", cx);
+        let filename = input("输出文件名（不含扩展名）", cx);
         let gain = input("0", cx);
         let width = input("100", cx);
         let reverb = input("0", cx);
         let tags = [
-            input("Title", cx),
+            input("例如 Piano Sonata No. 11", cx),
             input("Artist", cx),
             input("Album", cx),
             input("01", cx),
@@ -359,6 +360,7 @@ impl Studio {
             fade_out,
             limiter,
             effects_open: false,
+            tags_open: false,
             cd_cue: true,
             cd_files: Vec::new(),
             cd_rows: Vec::new(),
