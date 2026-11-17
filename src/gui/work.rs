@@ -9,9 +9,8 @@ use gpui_kit::component::{
     label::Label,
 };
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, rgb,
+    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, rgb,
 };
 use gpui_kit::component::input::InputState;
 
@@ -509,7 +508,7 @@ impl Studio {
         if self.tags_open && selected.is_some() {
             body = body.child(div().px(px(19.)).py(px(8.)).child(tag_form(self)));
         }
-        body.child(
+        body = body.child(
             div()
                 .px(px(19.))
                 .py(px(12.))
