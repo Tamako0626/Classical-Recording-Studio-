@@ -1,4 +1,4 @@
-//! 试听: ffmpeg 先写成临时 WAV, 再交给本机播放设备.
+//! 试听. 本机能直接解码的文件从指定位置播放, 其余格式先由 ffmpeg 写成一段 WAV.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::error::{StudioError, StudioResult};
 
 enum PlayCmd {
-    Play(PathBuf, Sender<Result<(), String>>),
+    Play { path: PathBuf, offset: Duration, ack: Sender<Result<(), String>> },
     Stop,
 }
 
@@ -28,7 +28,7 @@ impl Player {
                             sink.stop();
                         }
                     }
-                    PlayCmd::Play(path, ack) => {
+                    PlayCmd::Play { path, offset, ack } => {
                         if let Some(sink) = sink.take() {
                             sink.stop();
                         }
@@ -41,6 +41,12 @@ impl Player {
                             let file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
                             let source = rodio::Decoder::new(std::io::BufReader::new(file)).map_err(|error| error.to_string())?;
                             next.append(source);
+                            if offset > Duration::from_millis(80) {
+                                if let Err(error) = next.try_seek(offset) {
+                                    next.stop();
+                                    return Err(error.to_string());
+                                }
+                            }
                             sink = Some(next);
                             Ok(())
                         })();
@@ -53,9 +59,13 @@ impl Player {
     }
 
     pub fn play(&self, path: PathBuf) -> StudioResult<()> {
+        self.play_at(path, Duration::from_secs(0))
+    }
+
+    pub fn play_at(&self, path: PathBuf, offset: Duration) -> StudioResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(PlayCmd::Play(path, ack_tx))
+            .send(PlayCmd::Play { path, offset, ack: ack_tx })
             .map_err(|_| StudioError::new("播放器已经退出."))?;
         match ack_rx.recv_timeout(Duration::from_secs(8)) {
             Ok(Ok(())) => Ok(()),

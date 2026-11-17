@@ -17,6 +17,7 @@ mod parity;
 #[cfg(test)]
 mod suite;
 pub mod playback;
+pub mod program;
 pub mod store;
 pub mod video;
 

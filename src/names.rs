@@ -164,6 +164,23 @@ pub fn source_leaf(source: &str) -> String {
     source.rsplit(['/', '\\']).next().unwrap_or(source).to_string()
 }
 
+pub fn seek_at(index: usize, parts: usize, duration: f64) -> f64 {
+    if parts == 0 || !duration.is_finite() || duration <= 0.0 {
+        return 0.0;
+    }
+    let index = index.min(parts - 1) as f64;
+    let at = duration * (index + 0.5) / parts as f64;
+    if at.is_finite() { at.min(duration) } else { 0.0 }
+}
+
+pub fn listen_span(start: f64, duration: f64, limit: Option<f64>) -> f64 {
+    let start = if start.is_finite() && start > 0.0 { start } else { 0.0 };
+    let remaining = if duration.is_finite() && duration > 0.0 { (duration - start).max(0.0) } else { f64::INFINITY };
+    let requested = limit.filter(|value| value.is_finite() && *value > 0.0);
+    let span = requested.unwrap_or(remaining).min(remaining);
+    if span.is_finite() { span.max(0.0) } else { 0.0 }
+}
+
 pub fn track_number(project: &Project, track: &Track, index: usize) -> usize {
     if track.disc == 0 {
         return index + 1;
@@ -756,6 +773,20 @@ mod tests {
         tracks[2].tags.title = "Encore".into();
         let groups = suggest_movement_groups(&tracks);
         assert_eq!(groups[0].indexes, vec![0, 1]);
+    }
+
+    #[test]
+    fn seek_and_listen_span_follow_the_file() {
+        assert_eq!(seek_at(0, 40, 80.0), 1.0);
+        assert_eq!(seek_at(39, 40, 80.0), 79.0);
+        assert_eq!(seek_at(0, 0, 10.0), 0.0);
+        assert_eq!(seek_at(3, 4, f64::NAN), 0.0);
+        assert_eq!(listen_span(0.0, 100.0, None), 100.0);
+        assert_eq!(listen_span(90.0, 100.0, Some(20.0)), 10.0);
+        assert_eq!(listen_span(0.0, 0.0, Some(20.0)), 20.0);
+        assert_eq!(listen_span(5.0, 0.0, None), 0.0);
+        assert_eq!(listen_span(110.0, 100.0, Some(20.0)), 0.0);
+        assert_eq!(listen_span(f64::NAN, 30.0, None), 30.0);
     }
 
     #[test]

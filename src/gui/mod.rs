@@ -61,12 +61,19 @@ fn page_from(place: chrome::Place) -> Page {
     }
 }
 
+struct PlayedClip {
+    path: std::path::PathBuf,
+    origin: f64,
+    span: f64,
+    limited: bool,
+}
+
 enum JobMsg {
     Status(String),
     Done { operation: &'static str, result: Result<String, String> },
     English(Result<Vec<EnglishSuggestion>, String>),
     Works(Result<Vec<WorkHit>, String>),
-    Play(Result<std::path::PathBuf, String>),
+    Play(Result<PlayedClip, String>),
 }
 
 pub struct Studio {
@@ -90,6 +97,16 @@ pub struct Studio {
     filter_venue: String,
     playhead: f64,
     playing: bool,
+    open_menu: Option<String>,
+    preview_key: String,
+    preview_miss: String,
+    preview_duration: Option<f64>,
+    play_origin: f64,
+    play_span: f64,
+    play_mark: std::time::Instant,
+    play_generation: u64,
+    pending_listen: Option<(f64, Option<f64>)>,
+    movement_open: bool,
     project_index: Option<usize>,
     track_index: Option<usize>,
     track_picks: std::collections::BTreeSet<usize>,
@@ -161,12 +178,15 @@ pub struct Studio {
     llm_key: Entity<InputState>,
     review: Vec<EnglishSuggestion>,
     mb_query: Entity<InputState>,
+    movements: Entity<InputState>,
     mb_hits: Vec<WorkHit>,
     preview_raw: Option<std::path::PathBuf>,
     preview_wet: Option<std::path::PathBuf>,
     save_task: Option<Task<()>>,
     job_task: Option<Task<()>>,
     progress_task: Option<Task<()>>,
+    duration_task: Option<Task<()>>,
+    clock_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -227,6 +247,7 @@ impl Studio {
         let cd_row_composer = input("作曲家", cx);
         let cd_row_file = input("文件名, 不含扩展名", cx);
         let mb_query = input("曲名, 作品号", cx);
+        let movements = input("I. Allegro | II. Adagio | III. Rondo", cx);
         let filter_query = input("项目、人物、曲目或文件名", cx);
         drop(input);
         let llm = store::load_llm();
@@ -314,6 +335,16 @@ impl Studio {
             filter_venue: String::new(),
             playhead: 0.0,
             playing: false,
+            open_menu: None,
+            preview_key: String::new(),
+            preview_miss: String::new(),
+            preview_duration: None,
+            play_origin: 0.0,
+            play_span: 0.0,
+            play_mark: std::time::Instant::now(),
+            play_generation: 0,
+            pending_listen: None,
+            movement_open: false,
             project_index,
             track_index,
             track_picks: std::collections::BTreeSet::new(),
@@ -385,12 +416,15 @@ impl Studio {
             llm_key,
             review: Vec::new(),
             mb_query,
+            movements,
             mb_hits: Vec::new(),
             preview_raw: None,
             preview_wet: None,
             save_task: None,
             job_task: None,
             progress_task: None,
+            duration_task: None,
+            clock_task: None,
             _subscriptions: subscriptions,
         };
         studio.push(window, cx);
@@ -641,13 +675,17 @@ impl Studio {
                 self.status = format!("MusicBrainz 返回 {} 条.", self.mb_hits.len()).into();
             }
             JobMsg::Works(Err(text)) => self.show_error(text, cx),
-            JobMsg::Play(Ok(path)) => {
-                if let Err(error) = self.player.play(path) {
+            JobMsg::Play(Ok(clip)) => {
+                self.playhead = clip.origin;
+                if let Err(error) = self.player.play(clip.path) {
                     self.playing = false;
                     self.show_error(error.to_string(), cx);
                 } else {
-                    self.playing = true;
-                    self.status = "正在试听.".into();
+                    let limited = clip.limited;
+                    self.begin_clock(clip.origin, clip.span, cx);
+                    if limited {
+                        self.status = "这个格式先试听 20 秒.".into();
+                    }
                 }
             }
             JobMsg::Play(Err(text)) => {

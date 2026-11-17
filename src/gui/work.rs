@@ -25,9 +25,10 @@ use crate::llm::{self, LlmConfig};
 use crate::mb;
 use crate::model::{self, Project, Track, TAG_KEYS};
 use crate::names;
+use crate::program;
 use crate::video::{self, VideoMode};
 
-use super::{set_text, text, JobMsg, Studio};
+use super::{set_text, text, JobMsg, PlayedClip, Studio};
 
 const AUDIO_EXT: &[&str] = &["wav", "flac", "mp3", "mkv", "ape", "m4a", "aac", "aiff", "aif", "ogg", "opus", "wv"];
 const CD_EXT: &[&str] = &["wav", "flac", "mp3", "mkv", "ape", "m4a", "aac", "aiff", "aif", "ogg", "opus", "wv", "cue"];
@@ -41,6 +42,7 @@ enum CdImport {
 
 impl Studio {
     pub(super) fn split_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_preview_duration(cx);
         let mut page = div().flex().flex_col().gap(px(16.)).child(self.split_toolbar(cx));
         let Some(project) = self.project().cloned() else {
             return page.child(super::surface().child(Label::new(chrome::label::SCRIPT_EMPTY))).into_any_element();
@@ -56,7 +58,13 @@ impl Studio {
                 super::surface()
                     .child(section_head(
                         chrome::section::SESSION,
-                        plain_btn(Button::new("english-session").label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx)))),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.))
+                            .child(primary_btn(Button::new("read-session").label("识别场次信息").on_click(cx.listener(|this, _, window, cx| this.import_program(true, window, cx)))))
+                            .child(plain_btn(Button::new("import-program").label("导入节目单").on_click(cx.listener(|this, _, window, cx| this.import_program(false, window, cx)))))
+                            .child(plain_btn(Button::new("english-session").label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))),
                     ))
                     .child(session_form(self)),
             )
@@ -77,6 +85,7 @@ impl Studio {
                                 .flex()
                                 .flex_row()
                                 .gap(px(8.))
+                                .child(plain_btn(Button::new("match-all-names").label("一键匹配全部文件名").on_click(cx.listener(|this, _, window, cx| this.match_filenames(false, window, cx)))))
                                 .child(plain_btn(Button::new("fill-tags").label("按场次更新全部标签").on_click(cx.listener(|this, _, window, cx| this.fill_tags(window, cx)))))
                                 .child(primary_btn(Button::new("add-track").label(chrome::label::ADD_TRACK).on_click(cx.listener(|this, _, window, cx| this.add_track(window, cx)))))
                                 .child(plain_btn(Button::new("add-at-playhead").label("＋ 从播放位置添加").on_click(cx.listener(|this, _, window, cx| this.add_at_playhead(window, cx))))),
@@ -145,7 +154,7 @@ impl Studio {
             .gap_2()
             .child(plain_btn(Button::new("back-five").label(chrome::label::BACK_FIVE).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.seek_preview(-chrome::SEEK_SECONDS, cx)))))
             .child(plain_btn(Button::new("forward-five").label(chrome::label::FORWARD_FIVE).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.seek_preview(chrome::SEEK_SECONDS, cx)))))
-            .child(quiet_btn(Button::new("preview-raw").label(chrome::label::PREVIEW_FROM).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview(false, cx)))))
+            .child(quiet_btn(Button::new("preview-raw").label(chrome::label::PREVIEW_FROM).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview_window(cx)))))
             .child(quiet_btn(Button::new("preview-native").label(chrome::label::RETURN_PREVIEW).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.return_preview(cx)))))
     }
 
@@ -203,8 +212,8 @@ impl Studio {
             .flex_col()
             .gap(px(12.))
             .child(quad(
-                select_line("format-cycle", "输出格式", &settings.format, &[("FLAC", "FLAC"), ("WAV", "WAV"), ("MP3", "MP3"), ("MKV", "MKV")], cx, set_format),
-                select_line("rate-cycle", "采样率", &rate, &[("44100", "44.1 kHz"), ("48000", "48 kHz"), ("96000", "96 kHz")], cx, set_rate),
+                select_line(self, "format-cycle", "输出格式", &settings.format, &[("FLAC", "FLAC"), ("WAV", "WAV"), ("MP3", "MP3"), ("MKV", "MKV")], cx, set_format),
+                select_line(self, "rate-cycle", "采样率", &rate, &[("44100", "44.1 kHz"), ("48000", "48 kHz"), ("96000", "96 kHz")], cx, set_rate),
                 labeled("增益（dB）", &self.gain),
                 labeled("声场宽度（%）", &self.width),
             ))
@@ -256,9 +265,9 @@ impl Studio {
         block = block
             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("降噪与修复"))
             .child(quad(
-                select_line("denoise-cycle", "降噪方式", &effects.denoise, &[("off", "关闭"), ("fft", "FFT"), ("nlm", "非局部均值")], cx, set_denoise),
+                select_line(self, "denoise-cycle", "降噪方式", &effects.denoise, &[("off", "关闭"), ("fft", "FFT"), ("nlm", "非局部均值")], cx, set_denoise),
                 labeled("FFT 降噪量（dB）", &self.noise_reduction),
-                select_line("hum-cycle", "电源噪声", &effects.hum, &[("off", "关闭"), ("50", "50 Hz"), ("60", "60 Hz")], cx, set_hum),
+                select_line(self, "hum-cycle", "电源噪声", &effects.hum, &[("off", "关闭"), ("50", "50 Hz"), ("60", "60 Hz")], cx, set_hum),
                 div().flex().flex_row().gap(px(8.)).items_center().child(check("declick", "去点击", effects.declick, cx, |project, value| project.settings.effects.declick = value)).child(check("declip", "修复削波", effects.declip, cx, |project, value| project.settings.effects.declip = value)),
             ))
             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("频率与声道"))
@@ -268,7 +277,7 @@ impl Studio {
                 labeled("低频 100 Hz（dB）", &self.bass),
                 labeled("中频 1 kHz（dB）", &self.mid),
             ))
-            .child(quad(labeled("高频 6 kHz（dB）", &self.treble), select_line("channels-cycle", "声道", &effects.channels, &[("source", "保持来源"), ("mono", "单声道"), ("swap", "交换左右"), ("invert", "反转右声道")], cx, set_channels), div(), div()))
+            .child(quad(labeled("高频 6 kHz（dB）", &self.treble), select_line(self, "channels-cycle", "声道", &effects.channels, &[("source", "保持来源"), ("mono", "单声道"), ("swap", "交换左右"), ("invert", "反转右声道")], cx, set_channels), div(), div()))
             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("动态与淡化"))
             .child(quad(
                 labeled("噪声门（dBFS，0 关闭）", &self.gate),
@@ -277,7 +286,7 @@ impl Studio {
                 div().flex().flex_row().items_center().child(check("deess", "减弱齿音", effects.deess, cx, |project, value| project.settings.effects.deess = value)),
             ))
             .child(quad(
-                select_line("normalize-cycle", "响度处理", &effects.normalize, &[("off", "关闭"), ("loud", "EBU R128"), ("dynamic", "动态")], cx, set_normalize),
+                select_line(self, "normalize-cycle", "响度处理", &effects.normalize, &[("off", "关闭"), ("loud", "EBU R128"), ("dynamic", "动态")], cx, set_normalize),
                 labeled("目标响度（LUFS）", &self.lufs),
                 labeled("淡入（秒）", &self.fade_in),
                 labeled("淡出（秒）", &self.fade_out),
@@ -291,8 +300,9 @@ impl Studio {
         for (index, source) in project.sources.iter().enumerate() {
             list = list.child(format!("{}. {source}", index + 1));
         }
-        let clock = names::format_seconds(self.playhead);
-        let short = short_clock(self.playhead);
+        let total = self.preview_duration.unwrap_or(0.0);
+        let clock = format!("{} / {}", names::format_seconds(self.playhead), names::format_seconds(total));
+        let short = format!("{} / {}", short_clock(self.playhead), short_clock(total));
         let info = if project.sources.is_empty() { "请选择原始音频文件。" } else { "使用所选文件试听整场录音。" };
         div()
             .flex()
@@ -353,8 +363,8 @@ impl Studio {
                             .child(if self.playing { "❚❚" } else { "▶" })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_preview(cx))),
                     )
-                    .child(div().text_size(px(12.)).child(format!("{short} / 0:00")))
-                    .child(div().flex_1().h(px(4.)).rounded(px(2.)).bg(rgb(0xc5c7cb)))
+                    .child(div().text_size(px(12.)).child(short))
+                    .child(self.seek_bar(cx))
                     .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("🔊"))
                     .child(div().text_size(px(14.)).text_color(rgb(0x66647a)).child("⋮")),
             )
@@ -392,7 +402,7 @@ impl Studio {
                 .child(div().w(px(170.)).child(columns[2]))
                 .child(div().w(px(168.)).child(columns[3]))
                 .child(div().w(px(168.)).child(columns[4]))
-                .child(div().w(px(88.)).child(columns[5])),
+                .child(div().w(px(120.)).child(columns[5])),
         );
         for (index, track) in project.tracks.iter().enumerate() {
             let id = track.id.clone();
@@ -408,12 +418,21 @@ impl Studio {
                 cx.notify();
             }));
             let actions = div()
-                .w(px(88.))
+                .w(px(120.))
                 .flex()
                 .flex_col()
                 .child(text_btn(Button::new(SharedString::from(format!("hear-{id}"))).label("试听").disabled(self.busy).on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
                     this.preview(false, cx);
+                }))))
+                .child(text_btn(Button::new(SharedString::from(format!("match-{id}"))).label("匹配文件名").on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_track(index, window, cx);
+                    this.match_filenames(true, window, cx);
+                }))))
+                .child(text_btn(Button::new(SharedString::from(format!("expand-{id}"))).label("展开乐章／分曲").on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_track(index, window, cx);
+                    this.movement_open = true;
+                    cx.notify();
                 }))))
                 .child(text_btn(Button::new(SharedString::from(format!("tags-{id}"))).label("编辑标签").on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
@@ -506,31 +525,85 @@ impl Studio {
                 .child(plain_btn(Button::new("split-merged").label(chrome::label::UNMERGE).on_click(cx.listener(|this, _, window, cx| this.split_merged(window, cx)))))
                 .child(plain_btn(Button::new("merge-groups").label(chrome::label::MERGE_GROUPS).on_click(cx.listener(|this, _, window, cx| this.merge_groups(window, cx)))))
                 .child(plain_btn(Button::new("cycle-status").label(format!("状态: {}", project.status)).on_click(cx.listener(|this, _, _, cx| this.cycle_status(cx))))),
-        )
-        .child(div().px(px(19.)).pb(px(16.)).child(group_block(project, cx)))
+        );
+        if self.movement_open {
+            body = body.child(
+                div()
+                    .px(px(19.))
+                    .pb(px(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("每段用 | 分开. 第一段保留起点, 最后一段保留终点."))
+                    .child(flat_input(&self.movements))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.))
+                            .child(primary_btn(Button::new("apply-movements").label("填入乐章").on_click(cx.listener(|this, _, window, cx| this.apply_movements(window, cx)))))
+                            .child(quiet_btn(Button::new("close-movements").label("取消").on_click(cx.listener(|this, _, _, cx| {
+                                this.movement_open = false;
+                                cx.notify();
+                            })))),
+                    ),
+            );
+        }
+        body.child(div().px(px(19.)).pb(px(16.)).child(group_block(project, cx)))
     }
 
     fn source_picker(&self, project: &Project, prefix: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.track_index.and_then(|index| project.tracks.get(index)).map(|track| track.source.clone()).unwrap_or_default();
         let shown = if current.trim().is_empty() { "请选择音频文件".to_string() } else { names::source_leaf(&current) };
-        let names = project.sources.clone();
-        let next = if names.is_empty() {
-            None
-        } else {
-            let index = names.iter().position(|item| item == &current);
-            let next_index = index.map(|item| (item + 1) % names.len()).unwrap_or(0);
-            Some(names[next_index].clone())
-        };
-        menu_box(SharedString::from(format!("{prefix}-source")), shown).on_click(cx.listener(move |this, _, _, cx| {
-            let Some(next) = next.clone() else {
+        let menu_id = format!("{prefix}-source");
+        let open = self.open_menu.as_deref() == Some(menu_id.as_str());
+        let sources = project.sources.clone();
+        let head_id = menu_id.clone();
+        let mut column = div().flex().flex_col().gap(px(4.)).w_full().min_w(px(0.)).child(menu_box(SharedString::from(menu_id.clone()), shown).on_click(cx.listener(move |this, _, _, cx| {
+            if this.project().map(|item| item.sources.is_empty()).unwrap_or(true) {
+                this.status = "请先导入录音文件.".into();
+                cx.notify();
                 return;
-            };
-            this.pull(cx);
-            if let Some(track) = this.track_mut() {
-                track.source = next;
             }
-            this.mark_dirty(cx);
-        }))
+            if this.open_menu.as_deref() == Some(head_id.as_str()) {
+                this.open_menu = None;
+            } else {
+                this.open_menu = Some(head_id.clone());
+            }
+            cx.notify();
+        })));
+        if open {
+            let mut list = div().flex().flex_col().rounded(px(8.)).border_1().border_color(rgb(0xdcd7e6)).bg(rgb(0xffffff)).overflow_hidden();
+            for (index, source) in sources.iter().enumerate() {
+                let source = source.clone();
+                let leaf = names::source_leaf(&source);
+                let picked = source == current;
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("{menu_id}-{index}")))
+                        .px(px(9.))
+                        .py(px(7.))
+                        .cursor_pointer()
+                        .bg(if picked { rgb(0xf0ebfa) } else { rgb(0xffffff) })
+                        .text_size(px(14.))
+                        .child(leaf)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pull(cx);
+                            if let Some(track) = this.track_mut() {
+                                track.source = source.clone();
+                            }
+                            this.open_menu = None;
+                            this.preview_key.clear();
+                            this.preview_miss.clear();
+                            this.preview_duration = None;
+                            this.duration_task = None;
+                            this.mark_dirty(cx);
+                        })),
+                );
+            }
+            column = column.child(list);
+        }
+        column
     }
 
     fn actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -846,7 +919,9 @@ impl Studio {
         if let Some(track) = self.project().and_then(|project| project.tracks.get(index)) {
             self.playhead = names::time_seconds(&track.start).ok().flatten().unwrap_or(0.0);
         }
+        self.player.stop();
         self.playing = false;
+        self.play_generation = self.play_generation.wrapping_add(1);
         self.push_track(window, cx);
         cx.notify();
     }
@@ -1374,32 +1449,100 @@ impl Studio {
                 return;
             }
         };
+        let limit = match names::time_seconds(&track.end) {
+            Ok(Some(end)) if end > start => Some(end - start),
+            Ok(_) => None,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
         self.playhead = start;
-        self.preview_at(start, processed, cx);
+        if processed {
+            self.extract_preview(start, 20.0, true, false, cx);
+        } else {
+            self.start_listen(start, limit, cx);
+        }
+    }
+
+    fn preview_window(&mut self, cx: &mut Context<Self>) {
+        self.start_listen(self.playhead, Some(20.0), cx);
     }
 
     pub(super) fn seek_preview(&mut self, delta: f64, cx: &mut Context<Self>) {
-        self.playhead = chrome::nudge_playhead(self.playhead, delta);
-        self.preview_at(self.playhead, false, cx);
+        let mut next = chrome::nudge_playhead(self.playhead, delta);
+        if let Some(duration) = self.preview_duration.filter(|value| value.is_finite() && *value > 0.0) {
+            next = next.min(duration);
+        }
+        self.playhead = next;
+        self.start_listen(next, None, cx);
+    }
+
+    fn seek_to(&mut self, at: f64, cx: &mut Context<Self>) {
+        let at = if at.is_finite() { at.max(0.0) } else { 0.0 };
+        self.playhead = at;
+        self.start_listen(at, None, cx);
     }
 
     fn return_preview(&mut self, cx: &mut Context<Self>) {
         self.playhead = 0.0;
-        self.preview_at(0.0, false, cx);
+        self.start_listen(0.0, None, cx);
     }
 
     pub(super) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
         if self.playing {
             self.player.stop();
             self.playing = false;
+            self.play_generation = self.play_generation.wrapping_add(1);
             self.status = "已暂停试听.".into();
             cx.notify();
             return;
         }
-        self.preview(false, cx);
+        self.start_listen(self.playhead, None, cx);
     }
 
-    fn preview_at(&mut self, start: f64, processed: bool, cx: &mut Context<Self>) {
+    fn start_listen(&mut self, start: f64, limit: Option<f64>, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        if self.preview_duration.filter(|value| value.is_finite() && *value > 0.0).is_none() {
+            self.pending_listen = Some((start, limit));
+            if !self.preview_key.is_empty() && self.preview_miss == self.preview_key {
+                self.preview_miss.clear();
+                self.preview_key.clear();
+                self.duration_task = None;
+            }
+            self.ensure_preview_duration(cx);
+            return;
+        }
+        self.pending_listen = None;
+        self.begin_playback(start, limit, cx);
+    }
+
+    fn begin_playback(&mut self, start: f64, limit: Option<f64>, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let start = if start.is_finite() { start.max(0.0) } else { 0.0 };
+        let duration = self.preview_duration.unwrap_or(0.0);
+        let span = names::listen_span(start, duration, limit);
+        if span <= 0.0 {
+            self.playing = false;
+            self.show_error("已经到录音末尾.", cx);
+            return;
+        }
+        let Some(path) = self.preview_path() else {
+            self.show_error("请先选择曲目和录音.", cx);
+            return;
+        };
+        self.playhead = start;
+        match self.player.play_at(path, std::time::Duration::from_secs_f64(start)) {
+            Ok(()) => self.begin_clock(start, span, cx),
+            Err(_) => self.extract_preview(start, span.min(20.0), false, span > 20.0, cx),
+        }
+    }
+
+    fn extract_preview(&mut self, start: f64, seconds: f64, processed: bool, limited: bool, cx: &mut Context<Self>) {
         self.pull(cx);
         if self.busy {
             return;
@@ -1422,6 +1565,8 @@ impl Studio {
                 return;
             }
         };
+        self.player.stop();
+        self.playing = false;
         self.cancel.reset();
         let cancel = self.cancel.clone();
         let settings = project.settings.clone();
@@ -1429,16 +1574,248 @@ impl Studio {
             let played = (|| {
                 let info = ffmpeg::probe(&binaries, &source, &cancel)?;
                 let filters = if processed { effects::filter_chain(&settings, info.duration, info.channels)? } else { Vec::new() };
-                export::preview_span(&binaries, &source, start, 20.0, &filters, settings.rate, &cancel)
+                export::preview_span(&binaries, &source, start, seconds, &filters, settings.rate, &cancel)
             })();
-            JobMsg::Play(played.map_err(|error| error.to_string()))
+            JobMsg::Play(played.map(|path| PlayedClip { path, origin: start, span: seconds, limited }).map_err(|error| error.to_string()))
         });
+    }
+
+    fn preview_path(&self) -> Option<std::path::PathBuf> {
+        let project = self.project()?;
+        let track = self.track_index.and_then(|index| project.tracks.get(index))?;
+        export::resolve_source(project, &track.source).ok()
+    }
+
+    fn ensure_preview_duration(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.preview_path().map(|path| path.display().to_string()) else {
+            if !self.preview_key.is_empty() || self.preview_duration.is_some() {
+                self.preview_key.clear();
+                self.preview_miss.clear();
+                self.preview_duration = None;
+            }
+            return;
+        };
+        if self.preview_key == key && (self.preview_duration.is_some() || self.duration_task.is_some() || self.preview_miss == key) {
+            return;
+        }
+        self.preview_key = key.clone();
+        self.preview_duration = None;
+        self.preview_miss.clear();
+        let Some(binaries) = self.ffmpeg.clone() else {
+            self.preview_miss = key;
+            return;
+        };
+        let cancel = self.cancel.clone();
+        let probe_key = key.clone();
+        self.duration_task = Some(cx.spawn(async move |this, cx| {
+            let seconds = cx
+                .background_spawn(async move { ffmpeg::probe(&binaries, std::path::Path::new(&probe_key), &cancel).ok().and_then(|info| info.duration.filter(|value| value.is_finite() && *value > 0.0)) })
+                .await;
+            let key_done = key;
+            this.update(cx, |this, cx| {
+                if this.preview_key != key_done {
+                    return;
+                }
+                if let Some(seconds) = seconds {
+                    this.preview_duration = Some(seconds);
+                    if let Some((start, limit)) = this.pending_listen.take() {
+                        this.begin_playback(start, limit, cx);
+                    }
+                } else {
+                    this.preview_miss = key_done;
+                    if this.pending_listen.take().is_some() {
+                        this.show_error("读不到录音时长.", cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(super) fn begin_clock(&mut self, origin: f64, span: f64, cx: &mut Context<Self>) {
+        self.play_origin = origin;
+        self.play_span = span.max(0.0);
+        self.play_mark = std::time::Instant::now();
+        self.play_generation = self.play_generation.wrapping_add(1);
+        let generation = self.play_generation;
+        self.playing = true;
+        self.status = "正在试听.".into();
+        self.clock_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.play_generation != generation || !this.playing {
+                            return true;
+                        }
+                        let elapsed = this.play_mark.elapsed().as_secs_f64();
+                        if elapsed >= this.play_span {
+                            this.playhead = this.play_origin + this.play_span;
+                            this.playing = false;
+                            this.player.stop();
+                            cx.notify();
+                            return true;
+                        }
+                        this.playhead = this.play_origin + elapsed;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn seek_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const PARTS: usize = 40;
+        let duration = self.preview_duration.unwrap_or(0.0);
+        let played = if duration > 0.0 { (self.playhead / duration).clamp(0.0, 1.0) } else { 0.0 };
+        let filled = (played * PARTS as f64).round() as usize;
+        let mut bar = div().flex_1().h(px(40.)).flex().flex_row().items_center();
+        for index in 0..PARTS {
+            let color = if duration > 0.0 && index < filled { rgb(0x5a3da8) } else { rgb(0xc5c7cb) };
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("seek-{index}")))
+                    .flex_1()
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let duration = this.preview_duration.unwrap_or(0.0);
+                        this.seek_to(names::seek_at(index, PARTS, duration), cx);
+                    }))
+                    .child(div().w_full().h(px(4.)).bg(color)),
+            );
+        }
+        bar
+    }
+
+    fn import_program(&mut self, session_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(file) = rfd::FileDialog::new().set_title(if session_only { "识别场次信息" } else { "导入节目单" }).add_filter("文本", &["txt", "md"]).pick_file() else {
+            return;
+        };
+        let bytes = match std::fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let parsed = program::parse_program(&program::decode_text(&bytes));
+        let (fields, tracks) = {
+            let Some(project) = self.project_mut() else {
+                return;
+            };
+            program::apply_program(project, &parsed, !session_only)
+        };
+        if fields == 0 && tracks == 0 {
+            self.show_error("没有识别到场次或曲目. 用「演奏家: 姓名」这样的行, 曲目用「1. 曲名」.", cx);
+            return;
+        }
+        if tracks > 0 {
+            self.track_index = Some(0);
+            self.track_picks.clear();
+        }
+        self.push(window, cx);
+        self.mark_dirty(cx);
+        self.status = if tracks > 0 { format!("已填写 {fields} 项场次信息, 导入 {tracks} 条曲目.").into() } else { format!("已填写 {fields} 项场次信息.").into() };
+    }
+
+    fn match_filenames(&mut self, only_current: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let track_count = self.project().map(|project| project.tracks.len()).unwrap_or(0);
+        let indexes: Vec<usize> = if only_current {
+            match self.track_index {
+                Some(index) if index < track_count => vec![index],
+                _ => {
+                    self.show_error("请先选择曲目.", cx);
+                    return;
+                }
+            }
+        } else {
+            (0..track_count).collect()
+        };
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        let rule = names::effective_naming(project);
+        let mut matched = 0;
+        for index in indexes {
+            let title = project.tracks[index].tags.title.clone();
+            let Some(hit) = catalog::suggest_work(&title) else {
+                continue;
+            };
+            project.tracks[index].tags.title = hit.title.to_string();
+            if project.tracks[index].tags.composer.trim().is_empty() {
+                project.tracks[index].tags.composer = hit.composer.to_string();
+            }
+            let filename = {
+                let tags = names::track_tags(project, &project.tracks[index], index);
+                let mut scratch = project.tracks[index].clone();
+                scratch.filename.clear();
+                names::filename_for(&rule, &scratch, &tags, index)
+            };
+            project.tracks[index].filename = filename;
+            matched += 1;
+        }
+        drop(project);
+        if matched == 0 {
+            self.show_error("本地曲目表没有匹配.", cx);
+            return;
+        }
+        self.push_track(window, cx);
+        self.mark_dirty(cx);
+        self.status = format!("已按曲目表填写 {matched} 个文件名.").into();
+    }
+
+    fn apply_movements(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let titles = program::movement_titles(&text(&self.movements, cx));
+        if titles.is_empty() {
+            self.show_error("请先写下乐章, 用 | 分开.", cx);
+            return;
+        }
+        let Some(index) = self.track_index else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        let expanded = {
+            let Some(project) = self.project_mut() else {
+                return;
+            };
+            if index >= project.tracks.len() {
+                None
+            } else {
+                let current = project.tracks[index].clone();
+                let expanded = program::expand_movements(&current, &titles);
+                let _ = project.tracks.splice(index..=index, expanded);
+                Some(())
+            }
+        };
+        if expanded.is_none() {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        }
+        self.track_index = Some(index);
+        self.track_picks.clear();
+        self.movement_open = false;
+        self.push_track(window, cx);
+        self.mark_dirty(cx);
+        self.status = format!("已展开 {} 个乐章.", titles.len()).into();
     }
 
     fn stop_job(&mut self, cx: &mut Context<Self>) {
         self.cancel.request();
         self.player.stop();
         self.playing = false;
+        self.play_generation = self.play_generation.wrapping_add(1);
         self.status = "已请求停止.".into();
         cx.notify();
     }
@@ -2090,19 +2467,47 @@ fn quad(first: impl IntoElement, second: impl IntoElement, third: impl IntoEleme
         .child(div().flex_1().min_w(px(0.)).child(fourth))
 }
 
-fn select_line(id: &'static str, label: &'static str, current: &str, options: &[(&'static str, &'static str)], cx: &mut Context<Studio>, set: fn(&mut Project, &str)) -> impl IntoElement {
+fn select_line(studio: &Studio, id: &'static str, label: &'static str, current: &str, options: &[(&'static str, &'static str)], cx: &mut Context<Studio>, set: fn(&mut Project, &str)) -> impl IntoElement {
     let index = options.iter().position(|(value, _)| *value == current).unwrap_or(0);
     let shown = options.get(index).map(|(_, name)| *name).unwrap_or(current).to_string();
-    let next = options[(index + 1) % options.len()].0;
-    div().flex().flex_col().gap(px(5.)).min_w(px(0.)).w_full().child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(label)).child(
+    let open = studio.open_menu.as_deref() == Some(id);
+    let mut column = div().flex().flex_col().gap(px(5.)).min_w(px(0.)).w_full().child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(label)).child(
         menu_box(id, shown).on_click(cx.listener(move |this, _, _, cx| {
-            this.pull(cx);
-            if let Some(project) = this.project_mut() {
-                set(project, next);
+            if this.open_menu.as_deref() == Some(id) {
+                this.open_menu = None;
+            } else {
+                this.open_menu = Some(id.to_string());
             }
-            this.mark_dirty(cx);
+            cx.notify();
         })),
-    )
+    );
+    if open {
+        let mut list = div().flex().flex_col().rounded(px(8.)).border_1().border_color(rgb(0xdcd7e6)).bg(rgb(0xffffff)).overflow_hidden();
+        for (value, name) in options {
+            let value = *value;
+            let picked = value == current;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("{id}-{value}")))
+                    .px(px(9.))
+                    .py(px(7.))
+                    .cursor_pointer()
+                    .bg(if picked { rgb(0xf0ebfa) } else { rgb(0xffffff) })
+                    .text_size(px(14.))
+                    .child(*name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pull(cx);
+                        if let Some(project) = this.project_mut() {
+                            set(project, value);
+                        }
+                        this.open_menu = None;
+                        this.mark_dirty(cx);
+                    })),
+            );
+        }
+        column = column.child(list);
+    }
+    column
 }
 
 fn menu_box(id: impl Into<gpui_kit::ElementId>, shown: String) -> gpui_kit::Stateful<gpui_kit::Div> {
