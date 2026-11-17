@@ -17,6 +17,7 @@ use gpui_kit::{
     WindowOptions, application, assets, div, init, open_window, px, rgb, size,
 };
 
+use crate::chrome;
 use crate::export::TrackReport;
 use crate::ffmpeg::{self, Binaries, Cancel};
 use crate::llm::{EnglishSuggestion, LlmConfig};
@@ -31,11 +32,26 @@ use crate::cue;
 enum Page {
     Projects,
     Split,
-    Cd,
-    Video,
+    Scripts,
     History,
     Templates,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    Cd,
+    Video,
     Llm,
+}
+
+fn page_from(place: chrome::Place) -> Page {
+    match place {
+        chrome::Place::Projects => Page::Projects,
+        chrome::Place::Split => Page::Split,
+        chrome::Place::Scripts => Page::Scripts,
+        chrome::Place::History => Page::History,
+        chrome::Place::Templates => Page::Templates,
+    }
 }
 
 enum JobMsg {
@@ -50,6 +66,10 @@ pub struct Studio {
     workspace: Workspace,
     llm: LlmConfig,
     page: Page,
+    overlay: Option<Overlay>,
+    project_group: &'static str,
+    playhead: f64,
+    playing: bool,
     project_index: Option<usize>,
     track_index: Option<usize>,
     track_picks: std::collections::BTreeSet<usize>,
@@ -250,6 +270,10 @@ impl Studio {
             workspace,
             llm,
             page: Page::Projects,
+            overlay: None,
+            project_group: "all",
+            playhead: 0.0,
+            playing: false,
             project_index,
             track_index,
             track_picks: std::collections::BTreeSet::new(),
@@ -520,6 +544,7 @@ impl Studio {
         self.track_picks.clear();
         self.track_index = self.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
         self.page = Page::Split;
+        self.overlay = None;
         self.push(window, cx);
         cx.notify();
     }
@@ -563,18 +588,115 @@ impl Studio {
             JobMsg::Works(Err(text)) => self.show_error(text, cx),
             JobMsg::Play(Ok(path)) => {
                 if let Err(error) = self.player.play(path) {
+                    self.playing = false;
                     self.show_error(error.to_string(), cx);
                 } else {
+                    self.playing = true;
                     self.status = "正在试听.".into();
                 }
             }
-            JobMsg::Play(Err(text)) => self.show_error(text, cx),
+            JobMsg::Play(Err(text)) => {
+                self.playing = false;
+                self.show_error(text, cx);
+            }
         }
         cx.notify();
     }
 
+    fn handle_key(&mut self, event: &gpui_kit::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let lookup = self.lookup_focused(window, cx);
+        let command = chrome::resolve(
+            &event.keystroke.key,
+            chrome::Mods {
+                primary: event.keystroke.modifiers.platform,
+                shift: event.keystroke.modifiers.shift,
+                alt: event.keystroke.modifiers.alt,
+                function: event.keystroke.modifiers.function,
+            },
+            chrome::Focus {
+                typing: event.prefer_character_input,
+                dialog: self.overlay.is_some(),
+                lookup,
+                preview: self.page == Page::Split && self.overlay.is_none(),
+                composing: event.keystroke.is_ime_in_progress(),
+            },
+        );
+        let Some(command) = command else {
+            return;
+        };
+        if chrome::keeps_text_editing(command) {
+            return;
+        }
+        match command {
+            chrome::Command::Confirm => self.search_work(cx),
+            chrome::Command::Dismiss => {
+                self.overlay = None;
+                cx.notify();
+            }
+            chrome::Command::PlayPause => self.toggle_preview(cx),
+            chrome::Command::SeekBack => self.seek_preview(-chrome::SEEK_SECONDS, cx),
+            chrome::Command::SeekForward => self.seek_preview(chrome::SEEK_SECONDS, cx),
+            chrome::Command::Copy | chrome::Command::Cut | chrome::Command::Paste | chrome::Command::SelectAll | chrome::Command::Undo | chrome::Command::Redo => {}
+        }
+    }
+
+    fn lookup_focused(&self, window: &Window, cx: &App) -> bool {
+        use gpui_kit::Focusable as _;
+        self.mb_query.read(cx).focus_handle(cx).is_focused(window)
+    }
+
+    fn export_backup(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let text = match store::export_backup(&self.workspace) {
+            Ok(text) => text,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let Some(path) = rfd::FileDialog::new().set_title(chrome::label::EXPORT_BACKUP).set_file_name("classical-recording-studio.json").save_file() else {
+            return;
+        };
+        if let Err(error) = std::fs::write(&path, text) {
+            self.show_error(error.to_string(), cx);
+            return;
+        }
+        self.status = format!("已导出备份 {}", path.display()).into();
+        cx.notify();
+    }
+
+    fn import_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new().set_title(chrome::label::IMPORT_BACKUP).add_filter("JSON", &["json"]).pick_file() else {
+            return;
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let workspace = match store::import_backup(&text) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        self.workspace = workspace;
+        self.project_index = if self.workspace.projects.is_empty() { None } else { Some(0) };
+        self.track_index = self.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
+        self.track_picks.clear();
+        self.overlay = None;
+        self.page = Page::Projects;
+        self.project_group = "all";
+        self.push(window, cx);
+        self.status = "已导入备份.".into();
+        self.mark_dirty(cx);
+    }
+
     fn nav_button(&self, id: &'static str, mark: &'static str, label: &'static str, page: Page, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let selected = self.page == page;
+        let selected = self.page == page && self.overlay.is_none();
         let mut item = div()
             .id(id)
             .flex()
@@ -588,6 +710,7 @@ impl Studio {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.pull(cx);
                 this.page = page;
+                this.overlay = None;
                 cx.notify();
             }));
         if selected {
@@ -598,15 +721,18 @@ impl Studio {
 
     fn projects_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.workspace.projects.len();
-        let done = self.workspace.projects.iter().filter(|project| project.status == "已完成").count();
-        let repair = self.workspace.projects.iter().filter(|project| matches!(project.status.as_str(), "处理失败" | "需修复")).count();
-        let open = total.saturating_sub(done + repair);
+        let open = self.workspace.projects.iter().filter(|project| chrome::in_group(&project.status, "open")).count();
+        let done = self.workspace.projects.iter().filter(|project| chrome::in_group(&project.status, "complete")).count();
+        let repair = self.workspace.projects.iter().filter(|project| chrome::in_group(&project.status, "repair")).count();
         let mut rows = div().flex().flex_col();
         if self.workspace.projects.is_empty() {
             rows = rows.child(div().p(px(28.)).text_color(rgb(0x66647a)).child("还没有录音项目."));
         }
         for index in 0..self.workspace.projects.len() {
             let project = &self.workspace.projects[index];
+            if !chrome::in_group(&project.status, self.project_group) {
+                continue;
+            }
             let id = project.id.clone();
             let title = if project.name.trim().is_empty() { "未命名项目".to_string() } else { project.name.clone() };
             let mark = title.chars().next().unwrap_or('项').to_string();
@@ -682,16 +808,15 @@ impl Studio {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child(div().text_size(px(28.)).child("录音项目"))
-                            .child(div().text_color(rgb(0x5c5470)).child("归档演出录音, 管理分轨, 专辑标签, 封面和处理进度.")),
+                            .child(div().text_size(px(28.)).child(chrome::heading(chrome::Place::Projects).0))
+                            .child(div().text_color(rgb(0x5c5470)).child(chrome::heading(chrome::Place::Projects).1)),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .gap_2()
-                            .child(Button::new("open-file").label("打开项目文件").on_click(cx.listener(|this, _, window, cx| this.open_file(window, cx))))
-                            .child(Button::new("save-file").label("保存为项目文件").on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx)))),
+                            .child(Button::new("open-file").label(chrome::label::OPEN_PROJECT).on_click(cx.listener(|this, _, window, cx| this.open_file(window, cx)))),
                     ),
             )
             .child(
@@ -699,10 +824,10 @@ impl Studio {
                     .flex()
                     .flex_row()
                     .gap(px(12.))
-                    .child(stat_card(total, "全部项目", "▤"))
-                    .child(stat_card(open, "整理中", "◷"))
-                    .child(stat_card(done, "已完成", "✓"))
-                    .child(stat_card(repair, "待修复", "◇")),
+                    .child(stat_card(total, "all", "全部项目", "▤", self.project_group == "all", cx))
+                    .child(stat_card(open, "open", "整理中", "◷", self.project_group == "open", cx))
+                    .child(stat_card(done, "complete", "已完成", "✓", self.project_group == "complete", cx))
+                    .child(stat_card(repair, "repair", "待修复", "◇", self.project_group == "repair", cx)),
             )
             .child(
                 div()
@@ -721,7 +846,8 @@ impl Studio {
                             .items_center()
                             .justify_between()
                             .child(div().text_size(px(16.)).child("项目列表"))
-                            .child(Button::new("new-project").primary().label("新建项目").on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx)))),
+                            .child(Button::new("save-file").label(chrome::label::SAVE_LOCAL).on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx))))
+                            .child(Button::new("new-project").primary().label(chrome::label::NEW_PROJECT).on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx)))),
                     )
                     .child(rows)
                     .child(div().px(px(19.)).py(px(11.)).border_t_1().border_color(rgb(0xede9f3)).text_size(px(11.)).text_color(rgb(0x66647a)).child("删除项目只移出工作台, 不删除磁盘上的录音和导出文件.")),
@@ -734,6 +860,7 @@ impl Studio {
         self.project_index = Some(self.workspace.projects.len() - 1);
         self.track_index = Some(0);
         self.page = Page::Split;
+        self.overlay = None;
         self.push(window, cx);
         self.mark_dirty(cx);
     }
@@ -795,6 +922,7 @@ impl Studio {
         self.project_index = Some(self.workspace.projects.len() - 1);
         self.track_index = Some(0);
         self.page = Page::Split;
+        self.overlay = None;
         self.push(window, cx);
         self.mark_dirty(cx);
     }
@@ -818,8 +946,27 @@ impl Studio {
         cx.notify();
     }
 
-    fn header(&self) -> impl IntoElement {
-        let (title, detail) = page_copy(self.page);
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = chrome::heading(self.place()).0;
+        let mut tools = div().flex().flex_row().items_center().gap_2();
+        if self.overlay.is_some() {
+            tools = tools.child(Button::new("tool-close").xsmall().ghost().label(chrome::label::CLOSE).on_click(cx.listener(|this, _, _, cx| {
+                this.overlay = None;
+                cx.notify();
+            })));
+        }
+        tools = tools
+            .child(Button::new("tool-llm").xsmall().ghost().label(chrome::label::LLM).on_click(cx.listener(|this, _, _, cx| {
+                this.overlay = Some(Overlay::Llm);
+                cx.notify();
+            })))
+            .child(Button::new("tool-llm-files").xsmall().ghost().label(chrome::label::LLM_FILES).on_click(cx.listener(|this, _, _, cx| {
+                this.overlay = Some(Overlay::Llm);
+                cx.notify();
+            })))
+            .child(Button::new("tool-backup").xsmall().ghost().label(chrome::label::EXPORT_BACKUP).on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))))
+            .child(Button::new("tool-restore").xsmall().ghost().label(chrome::label::IMPORT_BACKUP).on_click(cx.listener(|this, _, window, cx| this.import_backup(window, cx))))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(self.status.clone()));
         div()
             .h(px(64.))
             .px(px(30.))
@@ -839,10 +986,50 @@ impl Studio {
                     .gap(px(12.))
                     .child(div().text_color(rgb(0x66647a)).child("工作区"))
                     .child(div().text_color(rgb(0x66647a)).child("/"))
-                    .child(title)
-                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(detail)),
+                    .child(title),
             )
-            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(self.status.clone()))
+            .child(tools)
+    }
+
+    fn overlay_page(&mut self, overlay: Overlay, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let title = match overlay {
+            Overlay::Cd => chrome::label::CD,
+            Overlay::Video => chrome::label::COVER_VIDEO,
+            Overlay::Llm => chrome::label::LLM,
+        };
+        let body = match overlay {
+            Overlay::Cd => self.cd_page(cx),
+            Overlay::Video => self.video_page(cx),
+            Overlay::Llm => self.llm_page(cx),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(title)
+                    .child(Button::new("close-overlay").small().label(chrome::label::CLOSE).on_click(cx.listener(|this, _, _, cx| {
+                        this.overlay = None;
+                        cx.notify();
+                    }))),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    fn place(&self) -> chrome::Place {
+        match self.page {
+            Page::Projects => chrome::Place::Projects,
+            Page::Split => chrome::Place::Split,
+            Page::Scripts => chrome::Place::Scripts,
+            Page::History => chrome::Place::History,
+            Page::Templates => chrome::Place::Templates,
+        }
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -920,13 +1107,7 @@ impl Render for Studio {
                     .flex_col()
                     .gap(px(5.))
                     .child(div().px(px(12.)).mb(px(4.)).text_size(px(11.)).text_color(rgb(0xbcb0d2)).child("工作区"))
-                    .child(self.nav_button("nav-projects", "▤", "录音项目", Page::Projects, cx))
-                    .child(self.nav_button("nav-split", "✂", "整场录音分轨", Page::Split, cx))
-                    .child(self.nav_button("nav-cd", "◉", "CD 抓轨整理", Page::Cd, cx))
-                    .child(self.nav_button("nav-video", "▶", "封面视频", Page::Video, cx))
-                    .child(self.nav_button("nav-history", "◷", "处理记录", Page::History, cx))
-                    .child(self.nav_button("nav-templates", "▧", "模板与命名", Page::Templates, cx))
-                    .child(self.nav_button("nav-llm", "✦", "模型配置", Page::Llm, cx)),
+                    .children(chrome::navigation().map(|item| self.nav_button(item.id, item.mark, item.label, page_from(item.place), cx))),
             )
             .child(div().flex_1())
             .child(
@@ -942,19 +1123,22 @@ impl Render for Studio {
                     .text_size(px(11.))
                     .text_color(rgb(0xd6c9e9))
                     .child(div().w(px(7.)).h(px(7.)).rounded(px(7.)).bg(rgb(0xa5e4be)))
-                    .child("本机工作区"),
+                    .child(chrome::label::SYNC),
             )
             .into_any_element();
-        let header = self.header().into_any_element();
+        let header = self.header(cx).into_any_element();
         let footer = self.footer(cx).into_any_element();
-        let page = match self.page {
-            Page::Projects => self.projects_page(window, cx).into_any_element(),
-            Page::Split => self.split_page(cx),
-            Page::Cd => self.cd_page(cx),
-            Page::Video => self.video_page(cx),
-            Page::History => self.history_page(cx),
-            Page::Templates => self.templates_page(cx),
-            Page::Llm => self.llm_page(cx),
+        let overlay = self.overlay;
+        let page = if let Some(overlay) = overlay {
+            self.overlay_page(overlay, cx)
+        } else {
+            match self.page {
+                Page::Projects => self.projects_page(window, cx).into_any_element(),
+                Page::Split => self.split_page(cx),
+                Page::Scripts => self.scripts_page(cx),
+                Page::History => self.history_page(cx),
+                Page::Templates => self.templates_page(cx),
+            }
         };
         div()
             .flex()
@@ -962,6 +1146,7 @@ impl Render for Studio {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .capture_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| this.handle_key(event, window, cx)))
             .child(nav)
             .child(
                 div()
@@ -1008,30 +1193,24 @@ pub(super) fn surface() -> Div {
     div().bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.)).p(px(19.)).flex().flex_col().gap_2()
 }
 
-fn page_copy(page: Page) -> (&'static str, &'static str) {
-    match page {
-        Page::Projects => ("录音项目", "归档演出录音, 管理分轨, 专辑标签, 封面和处理进度."),
-        Page::Split => ("整场录音分轨", "按时间点切开整场录音, 写入标签, 封面和增益."),
-        Page::Cd => ("CD 抓轨整理", "读取 CUE 和分轨音频, 导入到当前项目."),
-        Page::Video => ("封面视频", "用静态封面和音轨做成 1920x1080 的 H.264 视频."),
-        Page::History => ("处理记录", "查看导出, 试听和导入留下的记录."),
-        Page::Templates => ("模板与命名", "保存格式, 采样率, 增益, 后期和命名规则."),
-        Page::Llm => ("模型配置", "API Key 只留在本机, 不写入项目文件."),
-    }
-}
 
-fn stat_card(value: usize, label: &'static str, mark: &'static str) -> impl IntoElement {
+fn stat_card(value: usize, group: &'static str, label: &'static str, mark: &'static str, selected: bool, cx: &mut Context<Studio>) -> impl IntoElement {
     div()
+        .id(SharedString::from(format!("group-{group}")))
         .flex_1()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(12.))
         .p(px(14.))
-        .bg(rgb(0xffffff))
+        .bg(if selected { rgb(0xf4effb) } else { rgb(0xffffff) })
         .border_1()
-        .border_color(rgb(0xe5e1ed))
+        .border_color(if selected { rgb(0x5a3da8) } else { rgb(0xe5e1ed) })
         .rounded(px(14.))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.project_group = group;
+            cx.notify();
+        }))
         .child(
             div()
                 .w(px(36.))

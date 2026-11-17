@@ -1,6 +1,7 @@
 //! 古典录音工作台: GPUI Kit 界面, 裁剪版 ffmpeg 处理音频.
 
 pub mod catalog;
+pub mod chrome;
 pub mod cue;
 pub mod effects;
 pub mod error;

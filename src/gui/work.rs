@@ -12,6 +12,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px};
 
+use crate::chrome;
 use crate::catalog;
 use crate::cue::{self, CueTrack};
 use crate::effects;
@@ -37,16 +38,44 @@ enum CdImport {
 
 impl Studio {
     pub(super) fn split_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut page = div().flex().flex_col().gap(px(16.)).child(self.split_toolbar(cx));
         let Some(project) = self.project().cloned() else {
-            return super::surface().child(Label::new("请先建立或打开一个项目.")).into_any_element();
+            return page.child(super::surface().child(Label::new(chrome::label::SCRIPT_EMPTY))).into_any_element();
         };
-        let mut page = div().flex().flex_col().gap(px(16.));
         page = page
-            .child(super::surface().child(Label::new("演出与录音")).child(session_form(self)))
-            .child(super::surface().child(Label::new("输出")).child(output_form(self)))
-            .child(super::surface().child(self.settings_block(&project.settings, cx)))
-            .child(super::surface().child(self.effects_block(&project, cx)));
-        page = page.child(super::surface().child(self.source_block(&project, cx))).child(super::surface().child(self.track_block(&project, cx))).child(super::surface().child(self.actions(cx)));
+            .child(
+                super::surface()
+                    .child(Label::new(chrome::section::IMPORT))
+                    .child(self.source_block(&project, cx))
+                    .child(self.transport(cx)),
+            )
+            .child(
+                super::surface()
+                    .child(Label::new(chrome::section::SESSION))
+                    .child(Button::new("english-session").small().label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))
+                    .child(session_form(self)),
+            )
+            .child(super::surface().child(Label::new(chrome::section::COVER)).child(self.cover_block(cx)))
+            .child(super::surface().child(Label::new(chrome::section::TRACKS)).child(self.track_block(&project, cx)))
+            .child(
+                super::surface()
+                    .child(Label::new(chrome::section::OUTPUT))
+                    .child(output_form(self))
+                    .child(self.settings_block(&project.settings, cx))
+                    .child(self.effects_block(&project, cx))
+                    .child(self.actions(cx)),
+            )
+            .child(
+                super::surface().child(Label::new(chrome::section::RESULT)).child(
+                    Button::new("open-video")
+                        .primary()
+                        .label(chrome::label::COVER_VIDEO)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.overlay = Some(super::Overlay::Video);
+                            cx.notify();
+                        })),
+                ),
+            );
         if !self.preflight.is_empty() {
             page = page.child(super::surface().child(Label::new("导出预检")).child(preflight_lines(&self.preflight)));
         }
@@ -56,6 +85,49 @@ impl Studio {
         page.into_any_element()
     }
 
+    fn split_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, detail) = chrome::heading(chrome::Place::Split);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(div().flex().flex_col().gap_1().child(Label::new(title)).child(Label::new(detail)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(Button::new("open-cd").primary().label(chrome::label::CD).on_click(cx.listener(|this, _, _, cx| {
+                        this.overlay = Some(super::Overlay::Cd);
+                        cx.notify();
+                    })))
+                    .child(Button::new("new-session").label(chrome::label::NEW_SESSION).on_click(cx.listener(|this, _, window, cx| this.create_project(window, cx)))),
+            )
+    }
+
+    fn transport(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(Button::new("back-five").small().label(chrome::label::BACK_FIVE).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.seek_preview(-chrome::SEEK_SECONDS, cx))))
+            .child(Button::new("forward-five").small().label(chrome::label::FORWARD_FIVE).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.seek_preview(chrome::SEEK_SECONDS, cx))))
+            .child(Button::new("preview-raw").small().label(chrome::label::PREVIEW_FROM).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview(false, cx))))
+            .child(Button::new("preview-native").small().label(chrome::label::RETURN_PREVIEW).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.return_preview(cx))))
+    }
+
+    fn cover_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(Button::new("pick-cover").small().label(chrome::label::UPLOAD_COVER).on_click(cx.listener(|this, _, window, cx| this.pick_cover(false, window, cx))))
+            .child(Button::new("pick-back").small().label(chrome::label::PICK_BACK).on_click(cx.listener(|this, _, window, cx| this.pick_cover(true, window, cx))))
+            .child(Label::new(cover_label(self.project())))
+    }
+
     fn settings_block(&self, settings: &Settings, cx: &mut Context<Self>) -> impl IntoElement {
         let format_index = ["FLAC", "WAV", "MP3", "MKV"].iter().position(|item| *item == settings.format);
         let rate_index = [44100, 48000, 96000].iter().position(|item| *item == settings.rate);
@@ -63,7 +135,6 @@ impl Studio {
             .flex()
             .flex_col()
             .gap_2()
-            .child(Label::new("输出"))
             .child(
                 RadioGroup::new("format")
                     .children(["FLAC", "WAV", "MP3", "MKV"])
@@ -91,18 +162,9 @@ impl Studio {
             .child(check("embed-cover", "嵌入封面", settings.cover, cx, |project, value| project.settings.cover = value))
             .child(check("split-tracks", "按时间点分轨", settings.split, cx, |project, value| project.settings.split = value))
             .child(check("write-tags", "写入标签", settings.metadata, cx, |project, value| project.settings.metadata = value))
-            .child(check("embed-back", "嵌入封底", settings.embed_back, cx, |project, value| project.settings.embed_back = value))
-            .child(check("auto-join", "空的终点接到下一轨起点", self.project().is_some_and(|project| project.auto_join), cx, |project, value| project.auto_join = value))
-            .child(check("disc-folders", "按碟分子文件夹", self.project().is_some_and(|project| project.disc_folders), cx, |project, value| project.disc_folders = value))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(Button::new("pick-cover").small().label("选择封面").on_click(cx.listener(|this, _, window, cx| this.pick_cover(false, window, cx))))
-                    .child(Button::new("pick-back").small().label("选择封底").on_click(cx.listener(|this, _, window, cx| this.pick_cover(true, window, cx))))
-                    .child(Label::new(cover_label(self.project()))),
-            )
+            .child(check("embed-back", chrome::label::EMBED_BACK, settings.embed_back, cx, |project, value| project.settings.embed_back = value))
+            .child(check("auto-join", chrome::label::JOIN, self.project().is_some_and(|project| project.auto_join), cx, |project, value| project.auto_join = value))
+            .child(check("disc-folders", chrome::label::DISC_FOLDERS, self.project().is_some_and(|project| project.disc_folders), cx, |project, value| project.disc_folders = value))
     }
 
     fn effects_block(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -180,16 +242,19 @@ impl Studio {
             .flex()
             .flex_col()
             .gap_2()
-            .child(Label::new("录音"))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(Button::new("add-audio").small().label("添加录音").on_click(cx.listener(|this, _, window, cx| this.add_audio(window, cx))))
+                    .child(Button::new("add-audio").small().primary().label(chrome::label::IMPORT_AUDIO).on_click(cx.listener(|this, _, window, cx| this.add_audio(window, cx))))
+                    .child(Button::new("llm-audio").small().label(chrome::label::RECOGNIZE_AUDIO).on_click(cx.listener(|this, _, _, cx| {
+                        this.overlay = Some(super::Overlay::Llm);
+                        cx.notify();
+                    })))
                     .child(Button::new("relink-audio").small().label("重新关联当前曲目").on_click(cx.listener(|this, _, window, cx| this.relink(window, cx))))
                     .child(Button::new("tracks-from-sources").small().label("按录音各加一轨").on_click(cx.listener(|this, _, window, cx| this.tracks_from_sources(window, cx))))
-                    .child(Button::new("concat-sources").small().label("合并为 FLAC").on_click(cx.listener(|this, _, window, cx| this.concat_sources(window, cx))))
+                    .child(Button::new("concat-sources").small().primary().label(chrome::label::CONCAT).on_click(cx.listener(|this, _, window, cx| this.concat_sources(window, cx))))
                     .child(Button::new("relink-tree").small().label("按文件夹重新关联").on_click(cx.listener(|this, _, window, cx| this.relink_tree(window, cx))))
                     .child(Button::new("source-root").small().label("设置素材根目录").on_click(cx.listener(|this, _, window, cx| this.choose_root(window, cx)))),
             )
@@ -250,22 +315,21 @@ impl Studio {
             .flex()
             .flex_col()
             .gap_2()
-            .child(Label::new("曲目"))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(Button::new("add-track").small().label("添加曲目").on_click(cx.listener(|this, _, window, cx| this.add_track(window, cx))))
+                    .child(Button::new("add-track").small().primary().label(chrome::label::ADD_TRACK).on_click(cx.listener(|this, _, window, cx| this.add_track(window, cx))))
                     .child(Button::new("remove-track").small().danger().label("删除当前曲目").on_click(cx.listener(|this, _, window, cx| this.remove_track(window, cx))))
                     .child(Button::new("fill-tags").small().label("补齐空白标签").on_click(cx.listener(|this, _, window, cx| this.fill_tags(window, cx))))
                     .child(Button::new("apply-names").small().label("按规则填写空文件名").on_click(cx.listener(|this, _, window, cx| this.apply_names(window, cx))))
                     .child(Button::new("local-work").small().label("采用本地英文曲名").on_click(cx.listener(|this, _, window, cx| this.apply_catalog(window, cx))))
-                    .child(Button::new("merge-tracks").small().label("合并所选为一轨").disabled(self.track_picks.len() < 2).on_click(cx.listener(|this, _, window, cx| {
+                    .child(Button::new("merge-tracks").small().label(chrome::label::MERGE).disabled(self.track_picks.len() < 2).on_click(cx.listener(|this, _, window, cx| {
                         this.merge_selected(window, cx);
                     })))
-                    .child(Button::new("split-merged").small().label("拆回乐章").on_click(cx.listener(|this, _, window, cx| this.split_merged(window, cx))))
-                    .child(Button::new("merge-groups").small().label("合并建议的乐章").on_click(cx.listener(|this, _, window, cx| this.merge_groups(window, cx))))
+                    .child(Button::new("split-merged").small().label(chrome::label::UNMERGE).on_click(cx.listener(|this, _, window, cx| this.split_merged(window, cx))))
+                    .child(Button::new("merge-groups").small().label(chrome::label::MERGE_GROUPS).on_click(cx.listener(|this, _, window, cx| this.merge_groups(window, cx))))
                     .child(Button::new("cycle-status").small().label(format!("状态: {}", project.status)).on_click(cx.listener(|this, _, _, cx| this.cycle_status(cx)))),
             )
             .child(group_block(project, cx))
@@ -302,11 +366,25 @@ impl Studio {
             .flex()
             .flex_row()
             .gap_2()
-            .child(Button::new("preflight").label("导出前检查").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preflight(cx))))
-            .child(Button::new("export-album").primary().label("导出专辑").loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, window, cx| this.export_album(window, cx))))
-            .child(Button::new("stop-job").danger().label("停止").disabled(!self.busy).on_click(cx.listener(|this, _, _, cx| this.stop_job(cx))))
-            .child(Button::new("preview-raw").label("试听原声 20 秒").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview(false, cx))))
-            .child(Button::new("preview-wet").label("试听处理后 20 秒").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview(true, cx))))
+            .child(Button::new("preview-wet").label(chrome::label::PREVIEW_FX).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview(true, cx))))
+            .child(Button::new("preflight").label(chrome::label::PREFLIGHT).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preflight(cx))))
+            .child(Button::new("export-album").primary().label(chrome::label::RUN).loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, window, cx| this.export_album(window, cx))))
+            .child(Button::new("local-script").label(chrome::label::LOCAL_SCRIPT).on_click(cx.listener(|this, _, _, cx| {
+                this.overlay = None;
+                this.page = super::Page::Scripts;
+                cx.notify();
+            })))
+            .child(Button::new("stop-job").danger().label(chrome::label::STOP).disabled(!self.busy).on_click(cx.listener(|this, _, _, cx| this.stop_job(cx))))
+            .child(Button::new("save-session").label(chrome::label::SAVE_PROJECT).on_click(cx.listener(|this, _, _, cx| {
+                this.pull(cx);
+                this.status = "已保存到录音项目.".into();
+                this.mark_dirty(cx);
+            })))
+            .child(Button::new("open-saved").label(chrome::label::OPEN_SAVED).on_click(cx.listener(|this, _, _, cx| {
+                this.overlay = None;
+                this.page = super::Page::Projects;
+                cx.notify();
+            })))
             .child(super::field("MusicBrainz", &self.mb_query))
             .child(Button::new("search-work").small().label("检索作品").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx))))
     }
@@ -392,7 +470,7 @@ impl Studio {
                     .flex_row()
                     .gap_2()
                     .child(Button::new("cd-import").primary().label("导入到当前项目").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::Append, window, cx))))
-                    .child(Button::new("cd-next").label("追加为新碟").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::NextDisc, window, cx))))
+                    .child(Button::new("cd-next").label(chrome::label::APPEND_DISC).on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::NextDisc, window, cx))))
                     .child(Button::new("cd-replace").danger().label("替换全部曲目").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::Replace, window, cx)))),
             )
             .child(Form::new().child(super::field("专辑", &self.cd_title)).child(super::field("演出者", &self.cd_artist)).child(super::field("作曲家", &self.cd_composer)).child(super::field("日期", &self.cd_date)))
@@ -435,13 +513,28 @@ impl Studio {
             .into_any_element()
     }
 
+    pub(super) fn scripts_page(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+        let (title, detail) = chrome::heading(chrome::Place::Scripts);
+        let body = match self.project() {
+            Some(project) => match export::prepare(project) {
+                Ok(plan) => chrome::script_preview(&export::describe_plan(&plan)),
+                Err(error) => error.to_string(),
+            },
+            None => chrome::label::SCRIPT_EMPTY.to_string(),
+        };
+        super::surface().child(Label::new(title)).child(Label::new(detail)).child(Label::new(chrome::label::SCRIPT_CARD)).child(Label::new(body)).into_any_element()
+    }
+
     pub(super) fn history_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.project().map(|project| project.id.clone());
         let mut list = div().flex().flex_col().gap_2();
         for entry in self.workspace.logs.iter().rev().filter(|entry| current.as_ref().is_none_or(|id| entry.project_id == *id)).take(80) {
             list = list.child(Label::new(format!("{}  {}  {}  {}  {}", entry.time, entry.project_name, entry.operation, entry.result, entry.message)));
         }
+        let (title, detail) = chrome::heading(chrome::Place::History);
         super::surface()
+            .child(Label::new(title))
+            .child(Label::new(detail))
             .child(Label::new("只显示当前项目. 没有打开项目时显示全部."))
             .child(Button::new("clear-logs").small().danger().label("清除当前项目的记录").on_click(cx.listener(|this, _, _, cx| {
                 if let Some(id) = this.project().map(|project| project.id.clone()) {
@@ -469,7 +562,10 @@ impl Studio {
                 ),
             );
         }
+        let (title, detail) = chrome::heading(chrome::Place::Templates);
         super::surface()
+            .child(Label::new(title))
+            .child(Label::new(detail))
             .child(Label::new("模板保存格式, 采样率, 增益, 后期, 命名规则和输出文件夹."))
             .child(Button::new("save-template").primary().label("把当前项目存为模板").on_click(cx.listener(|this, _, _, cx| this.save_template(cx))))
             .child(list)
@@ -515,6 +611,10 @@ impl Studio {
     fn select_track(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         self.track_index = Some(index);
+        if let Some(track) = self.project().and_then(|project| project.tracks.get(index)) {
+            self.playhead = names::time_seconds(&track.start).ok().flatten().unwrap_or(0.0);
+        }
+        self.playing = false;
         self.push_track(window, cx);
         cx.notify();
     }
@@ -997,6 +1097,44 @@ impl Studio {
 
     fn preview(&mut self, processed: bool, cx: &mut Context<Self>) {
         self.pull(cx);
+        let Some(track) = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index)).cloned()) else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        let start = match names::time_seconds(&track.start) {
+            Ok(value) => value.unwrap_or(0.0),
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        self.playhead = start;
+        self.preview_at(start, processed, cx);
+    }
+
+    pub(super) fn seek_preview(&mut self, delta: f64, cx: &mut Context<Self>) {
+        self.playhead = chrome::nudge_playhead(self.playhead, delta);
+        self.preview_at(self.playhead, false, cx);
+    }
+
+    fn return_preview(&mut self, cx: &mut Context<Self>) {
+        self.playhead = 0.0;
+        self.preview_at(0.0, false, cx);
+    }
+
+    pub(super) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+        if self.playing {
+            self.player.stop();
+            self.playing = false;
+            self.status = "已暂停试听.".into();
+            cx.notify();
+            return;
+        }
+        self.preview(false, cx);
+    }
+
+    fn preview_at(&mut self, start: f64, processed: bool, cx: &mut Context<Self>) {
+        self.pull(cx);
         if self.busy {
             return;
         }
@@ -1018,13 +1156,6 @@ impl Studio {
                 return;
             }
         };
-        let start = match names::time_seconds(&track.start) {
-            Ok(value) => value.unwrap_or(0.0),
-            Err(error) => {
-                self.show_error(error.to_string(), cx);
-                return;
-            }
-        };
         self.cancel.reset();
         let cancel = self.cancel.clone();
         let settings = project.settings.clone();
@@ -1041,11 +1172,12 @@ impl Studio {
     fn stop_job(&mut self, cx: &mut Context<Self>) {
         self.cancel.request();
         self.player.stop();
+        self.playing = false;
         self.status = "已请求停止.".into();
         cx.notify();
     }
 
-    fn search_work(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn search_work(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -1509,6 +1641,7 @@ impl Studio {
         self.track_index = Some(0);
         self.track_picks.clear();
         self.page = super::Page::Split;
+        self.overlay = None;
         self.push(window, cx);
         self.status = format!("已导入 {imported} 条曲目, 跳过 {skipped} 张未配对的碟.").into();
         self.mark_dirty(cx);
@@ -1635,7 +1768,7 @@ impl Studio {
             self.show_error("请先建立项目.", cx);
             return;
         };
-        self.page = super::Page::Llm;
+        self.overlay = Some(super::Overlay::Llm);
         self.spawn_job(cx, move || match llm::suggest_english(&config, &project) {
             Ok(items) => JobMsg::English(Ok(items)),
             Err(error) => JobMsg::English(Err(error.to_string())),

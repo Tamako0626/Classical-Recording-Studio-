@@ -79,6 +79,22 @@ pub fn read_project_file(path: &std::path::Path) -> StudioResult<ProjectFile> {
     Ok(file)
 }
 
+pub fn export_backup(workspace: &Workspace) -> StudioResult<String> {
+    let data = serde_json::to_value(workspace)?;
+    Ok(serde_json::to_string_pretty(&serde_json::json!({"version": 1, "data": data}))?)
+}
+
+pub fn import_backup(text: &str) -> StudioResult<Workspace> {
+    let parsed: serde_json::Value = serde_json::from_str(text).map_err(|_| StudioError::new("备份格式无效，请选择由工作台导出的 JSON。"))?;
+    if parsed.get("data").is_some() {
+        if parsed.get("version").and_then(|item| item.as_u64()) != Some(1) {
+            return Err(StudioError::new("备份格式无效，请选择由工作台导出的 JSON。"));
+        }
+    }
+    let incoming = parsed.get("data").cloned().unwrap_or(parsed);
+    serde_json::from_value(incoming).map_err(|_| StudioError::new("备份格式无效，请选择由工作台导出的 JSON。"))
+}
+
 pub fn write_project_file(path: &std::path::Path, file: &ProjectFile) -> StudioResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
