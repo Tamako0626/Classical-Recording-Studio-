@@ -175,15 +175,15 @@ fn is_track_header(line: &str) -> bool {
 
 fn field_key(label: &str) -> Option<&'static str> {
     const MAP: &[(&str, &[&str])] = &[
-        ("name", &["场次", "专辑名", "专辑", "音乐会", "名称", "album", "concert"]),
-        ("date", &["演出日期", "日期", "date"]),
-        ("performer", &["演奏家", "独奏", "演出者", "performer", "soloist"]),
+        ("name", &["场次", "专辑名", "专辑", "音乐会", "名称", "album", "album title", "concert"]),
+        ("date", &["演出日期", "日期", "date", "album date"]),
+        ("performer", &["演奏家", "独奏", "演出者", "performer", "soloist", "album artist"]),
         ("conductor", &["指挥家", "指挥", "conductor"]),
-        ("composer", &["作曲家", "composer"]),
+        ("composer", &["作曲家", "composer", "album composer"]),
         ("orchestra", &["乐团", "乐队", "orchestra"]),
         ("city", &["城市", "city"]),
         ("venue", &["音乐厅", "地点", "场馆", "venue"]),
-        ("origin", &["录音来源", "来源", "origin"]),
+        ("origin", &["录音来源", "来源", "origin", "source"]),
     ];
     MAP.iter().find_map(|(key, names)| names.iter().any(|name| label.eq_ignore_ascii_case(name)).then_some(*key))
 }
@@ -314,6 +314,14 @@ fn split_time(line: &str) -> (String, String, &str) {
 }
 
 fn split_composer(title: &str) -> (String, String) {
+    let lower = title.to_ascii_lowercase();
+    if let Some(index) = lower.rfind(" | composer:") {
+        let name = title[..index].trim();
+        let composer = title[index + " | composer:".len()..].trim();
+        if !name.is_empty() && !composer.is_empty() {
+            return (composer.to_string(), name.to_string());
+        }
+    }
     let Some((left, right)) = split_label(title) else {
         return (String::new(), title.to_string());
     };
@@ -387,6 +395,10 @@ mod tests {
         assert_eq!(project.tracks.len(), 1);
         assert_eq!(project.tracks[0].tags.title, "月光奏鸣曲");
         assert_eq!(project.tracks[0].source, "live.flac");
+        let parsed = parse_program("Album Title: Recital\n1. Sonata | Composer: Mozart\n");
+        assert_eq!(parsed.name.as_deref(), Some("Recital"));
+        assert_eq!(parsed.tracks[0].title, "Sonata");
+        assert_eq!(parsed.tracks[0].composer, "Mozart");
     }
 
     #[test]

@@ -474,6 +474,8 @@ fn llm_config_does_not_enter_the_project_file() {
         base_url: "https://api.deepseek.com".into(),
         model: "deepseek-chat".into(),
         api_key: "secret-key".into(),
+        provider: "deepseek".into(),
+        vision: false,
     };
     let changed = llm::config_after_endpoint_change(
         &previous,
@@ -481,6 +483,8 @@ fn llm_config_does_not_enter_the_project_file() {
             base_url: "https://service.example/v1".into(),
             model: "other".into(),
             api_key: "secret-key".into(),
+            provider: "compatible".into(),
+            vision: true,
         },
     );
     assert!(changed.api_key.is_empty());
@@ -490,6 +494,8 @@ fn llm_config_does_not_enter_the_project_file() {
             base_url: "https://api.deepseek.com/".into(),
             model: "deepseek-chat".into(),
             api_key: "secret-key".into(),
+            provider: "deepseek".into(),
+            vision: false,
         },
     );
     assert_eq!(same.api_key, "secret-key");
@@ -502,6 +508,8 @@ fn llm_config_does_not_enter_the_project_file() {
             base_url: "http://service.example/v1".into(),
             model: "example".into(),
             api_key: "secret-key".into(),
+            provider: "compatible".into(),
+            vision: false,
         },
         "system",
         "user",

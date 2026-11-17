@@ -20,7 +20,8 @@ use gpui_kit::{
 use crate::chrome;
 use crate::export::TrackReport;
 use crate::ffmpeg::{self, Binaries, Cancel};
-use crate::llm::{EnglishSuggestion, LlmConfig};
+use crate::llm::{EnglishSuggestion, LlmConfig, NameHit, SessionCandidate};
+use crate::program::ImportedProgram;
 use crate::mb::WorkHit;
 use crate::model::{Project, Settings, Track, Workspace, TAG_KEYS};
 use crate::playback::Player;
@@ -74,6 +75,11 @@ enum JobMsg {
     English(Result<Vec<EnglishSuggestion>, String>),
     Works(Result<Vec<WorkHit>, String>),
     Play(Result<PlayedClip, String>),
+    Import { cd: bool, include_tracks: bool, text: String },
+    Sessions(Result<Vec<SessionCandidate>, String>),
+    Names(Result<Vec<NameHit>, String>),
+    Parts(Result<String, String>),
+    Models(Result<Vec<String>, String>),
 }
 
 pub struct Studio {
@@ -107,6 +113,15 @@ pub struct Studio {
     play_generation: u64,
     pending_listen: Option<(f64, Option<f64>)>,
     movement_open: bool,
+    intake_files: Vec<std::path::PathBuf>,
+    intake_session: bool,
+    session_hits: Vec<SessionCandidate>,
+    name_hits: Vec<NameHit>,
+    model_choices: Vec<String>,
+    pending_import: Option<ImportedProgram>,
+    pending_tracks: bool,
+    pending_cd: bool,
+    pending_parts: String,
     stitch_on: bool,
     stitch_paths: Vec<std::path::PathBuf>,
     stitch_slices: Vec<crate::names::StitchSlice>,
@@ -261,7 +276,7 @@ impl Studio {
         drop(input);
         let llm = store::load_llm();
         let llm_base = cx.new(|cx| InputState::new(window, cx).placeholder("https://api.deepseek.com").default_value(llm.base_url.clone()));
-        let llm_model = cx.new(|cx| InputState::new(window, cx).placeholder("deepseek-chat").default_value(llm.model.clone()));
+        let llm_model = cx.new(|cx| InputState::new(window, cx).placeholder("deepseek-flash").default_value(llm.model.clone()));
         let llm_key = cx.new(|cx| InputState::new(window, cx).placeholder("API Key").default_value(llm.api_key.clone()).masked(true));
         let watched = [
             name.clone(),
@@ -354,6 +369,15 @@ impl Studio {
             play_generation: 0,
             pending_listen: None,
             movement_open: false,
+            intake_files: Vec::new(),
+            intake_session: false,
+            session_hits: Vec::new(),
+            name_hits: Vec::new(),
+            model_choices: Vec::new(),
+            pending_import: None,
+            pending_tracks: false,
+            pending_cd: false,
+            pending_parts: String::new(),
             stitch_on: false,
             stitch_paths: Vec::new(),
             stitch_slices: Vec::new(),
@@ -695,6 +719,39 @@ impl Studio {
                 self.status = format!("MusicBrainz 返回 {} 条.", self.mb_hits.len()).into();
             }
             JobMsg::Works(Err(text)) => self.show_error(text, cx),
+            JobMsg::Import { cd, include_tracks, text } => {
+                let imported = crate::program::parse_program(&text);
+                let fields = [&imported.name, &imported.date, &imported.performer, &imported.conductor, &imported.composer, &imported.orchestra, &imported.city, &imported.venue, &imported.origin].iter().filter(|item| item.as_ref().is_some_and(|value| !value.trim().is_empty())).count();
+                if fields == 0 && imported.tracks.is_empty() {
+                    self.show_error("模型没有识别到场次或曲目.", cx);
+                } else {
+                    self.pending_import = Some(imported);
+                    self.pending_tracks = include_tracks;
+                    self.pending_cd = cd;
+                    self.status = format!("模型识别到 {fields} 项信息和 {} 条曲目. 请核对后填入.", self.pending_import.as_ref().map(|item| item.tracks.len()).unwrap_or(0)).into();
+                }
+            }
+            JobMsg::Sessions(Ok(items)) => {
+                self.session_hits = items;
+                self.status = if self.session_hits.is_empty() { "没有找到有来源的场次.".into() } else { format!("找到 {} 个场次候选. 请核对后来源.", self.session_hits.len()).into() };
+            }
+            JobMsg::Sessions(Err(text)) => self.show_error(text, cx),
+            JobMsg::Names(Ok(items)) => {
+                self.name_hits = items;
+                self.status = if self.name_hits.is_empty() { "模型没有给出足够明确的曲名.".into() } else { "请选择一条模型曲名.".into() };
+            }
+            JobMsg::Names(Err(text)) => self.show_error(text, cx),
+            JobMsg::Parts(Ok(text)) => {
+                self.pending_parts = text;
+                self.movement_open = true;
+                self.status = "模型给出了乐章, 可填入当前曲目.".into();
+            }
+            JobMsg::Parts(Err(text)) => self.show_error(text, cx),
+            JobMsg::Models(Ok(names)) => {
+                self.model_choices = names;
+                self.status = format!("已读取 {} 个模型, 可在模型页点选.", self.model_choices.len()).into();
+            }
+            JobMsg::Models(Err(text)) => self.show_error(text, cx),
             JobMsg::Play(Ok(clip)) => {
                 self.playhead = clip.origin;
                 if let Err(error) = self.player.play(clip.path) {

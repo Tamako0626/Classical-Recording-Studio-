@@ -22,8 +22,20 @@ const WORKS: &[Work] = &[
     Work { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 30 in E major, Op. 109", aliases: &["贝多芬第三十钢琴奏鸣曲"] },
     Work { composer: "Wolfgang Amadeus Mozart", title: "Piano Sonata No. 11 in A major, K. 331", aliases: &["土耳其进行曲奏鸣曲"] },
     Work { composer: "Wolfgang Amadeus Mozart", title: "Fantasia in C minor, K. 475", aliases: &["莫扎特幻想曲"] },
+    Work { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 6 in F major, Op. 10 No. 2", aliases: &["贝多芬第六奏鸣曲", "贝多芬第六钢琴奏鸣曲"] },
+    Work { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 7 in D major, Op. 10 No. 3", aliases: &["贝多芬第七奏鸣曲", "贝多芬第七钢琴奏鸣曲"] },
+    Work { composer: "Wolfgang Amadeus Mozart", title: "Piano Sonata No. 8 in A minor, K. 310", aliases: &["莫扎特第八钢琴奏鸣曲"] },
+    Work { composer: "Wolfgang Amadeus Mozart", title: "Piano Sonata No. 14 in C minor, K. 457", aliases: &["莫扎特第十四钢琴奏鸣曲"] },
+    Work { composer: "Wolfgang Amadeus Mozart", title: "Piano Concerto No. 24 in C minor, K. 491", aliases: &["莫扎特第二十四钢琴协奏曲"] },
     Work { composer: "Frédéric Chopin", title: "Piano Concerto No. 1 in E minor, Op. 11", aliases: &["肖协1", "肖一钢协"] },
+    Work { composer: "Frédéric Chopin", title: "Piano Concerto No. 2 in F minor, Op. 21", aliases: &["肖协2", "肖二钢协"] },
+    Work { composer: "Frédéric Chopin", title: "Mazurkas, Op. 7", aliases: &["肖邦Op7", "肖邦玛祖卡Op.7"] },
+    Work { composer: "Frédéric Chopin", title: "Nocturne in B major, Op. 62 No. 1", aliases: &["肖邦夜曲Op62-1"] },
     Work { composer: "Frédéric Chopin", title: "Barcarolle in F-sharp major, Op. 60", aliases: &["肖邦船歌", "船歌"] },
+    Work { composer: "Robert Schumann", title: "Piano Concerto in A minor, Op. 54", aliases: &["舒曼钢协"] },
+    Work { composer: "Franz Schubert", title: "Symphony No. 9 in C major, D. 944, The Great", aliases: &["舒九", "伟大交响曲"] },
+    Work { composer: "Claude Debussy", title: "L'isle joyeuse, L. 106", aliases: &["欢乐岛"] },
+    Work { composer: "Anton Bruckner", title: "Symphony No. 7 in E major, WAB 107", aliases: &["布七"] },
     Work { composer: "Johann Sebastian Bach", title: "English Suite No. 2 in A minor, BWV 807", aliases: &["巴赫第二英国组曲"] },
     Work { composer: "Robert Schumann", title: "Kinderszenen, Op. 15", aliases: &["童年情景"] },
     Work { composer: "Robert Schumann", title: "Fantasie in C major, Op. 17", aliases: &["舒曼C大调幻想曲"] },
@@ -56,5 +68,7 @@ mod tests {
         let hit = suggest_work("今晚的月光奏鸣曲").unwrap();
         assert!(hit.title.contains("Moonlight"));
         assert_eq!(hit.composer, "Ludwig van Beethoven");
+        assert!(suggest_work("肖协2").unwrap().title.contains("Op. 21"));
+        assert!(suggest_work("布七").unwrap().title.contains("WAB 107"));
     }
 }

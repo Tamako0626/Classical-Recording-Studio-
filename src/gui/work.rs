@@ -71,7 +71,8 @@ impl Studio {
                             .child(plain_btn(Button::new("import-program").label("导入节目单").on_click(cx.listener(|this, _, window, cx| this.import_program(false, window, cx)))))
                             .child(plain_btn(Button::new("english-session").label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))),
                     ))
-                    .child(session_form(self)),
+                    .child(session_form(self))
+                    .child(self.model_strip(cx)),
             )
             .child(super::surface().child(section_head(chrome::section::COVER, div())).child(self.cover_block(cx)))
             .child(
@@ -445,6 +446,10 @@ impl Studio {
                     this.select_track(index, window, cx);
                     this.match_filenames(true, window, cx);
                 }))))
+                .child(text_btn(Button::new(SharedString::from(format!("model-name-{id}"))).label("用模型匹配").disabled(self.busy).on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_track(index, window, cx);
+                    this.model_filename(cx);
+                }))))
                 .child(text_btn(Button::new(SharedString::from(format!("expand-{id}"))).label("展开乐章／分曲").on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
                     this.movement_open = true;
@@ -577,12 +582,20 @@ impl Studio {
                     .gap(px(8.))
                     .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("每段用 | 分开. 第一段保留起点, 最后一段保留终点."))
                     .child(flat_input(&self.movements))
+                    .child(if self.pending_parts.is_empty() { String::new() } else { format!("模型建议: {}", self.pending_parts) })
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .gap(px(8.))
                             .child(primary_btn(Button::new("apply-movements").label("填入乐章").on_click(cx.listener(|this, _, window, cx| this.apply_movements(window, cx)))))
+                            .child(plain_btn(Button::new("model-movements").label("用模型匹配乐章").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_movements(cx)))))
+                            .child(plain_btn(Button::new("use-model-movements").label("采用模型乐章").disabled(self.pending_parts.is_empty()).on_click(cx.listener(|this, _, window, cx| {
+                                let text = this.pending_parts.clone();
+                                set_text(&this.movements, &text, window, cx);
+                                this.status = "已填入模型乐章, 可再改后点填入乐章.".into();
+                                cx.notify();
+                            }))))
                             .child(quiet_btn(Button::new("close-movements").label("取消").on_click(cx.listener(|this, _, _, cx| {
                                 this.movement_open = false;
                                 cx.notify();
@@ -751,7 +764,9 @@ impl Studio {
                     })))
                     .child(Label::new(cover_label(self.project())))
                     .child(Button::new("cd-cue").small().label("为当前碟指定 CUE").on_click(cx.listener(|this, _, window, cx| this.assign_cue(window, cx))))
-                    .child(Button::new("cd-audio").small().label("为当前碟添加音频").on_click(cx.listener(|this, _, window, cx| this.add_disc_audio(window, cx)))),
+                    .child(Button::new("cd-audio").small().label("为当前碟添加音频").on_click(cx.listener(|this, _, window, cx| this.add_disc_audio(window, cx))))
+                    .child(Button::new("cd-model").small().label("用模型识别封面与封底").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_cd(cx))))
+                    .child(Button::new("cd-apply-model").small().label("填入模型识别").disabled(self.pending_import.is_none() || !self.pending_cd).on_click(cx.listener(|this, _, window, cx| this.apply_pending(window, cx)))),
             )
             .child(
                 div()
@@ -941,8 +956,21 @@ impl Studio {
             }
         }
         super::surface()
-            .child(Label::new("API Key 只保存在本机, 不写入项目文件."))
+            .child(Label::new("API Key 只保存在本机, 不写入项目文件. 图片识别要勾选图像输入. 联网核对使用 DeepSeek 官方接口和 deepseek-flash."))
             .child(Form::new().child(super::field("接口", &self.llm_base)).child(super::field("模型", &self.llm_model)).child(Field::new().label("API Key").child(Input::new(&self.llm_key).small().content_type(gpui_kit::component::input::InputContentType::Password).mask_toggle())))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(Button::new("provider-deepseek").small().selected(self.llm.provider != "compatible").label("DeepSeek").on_click(cx.listener(|this, _, window, cx| this.choose_provider(false, window, cx))))
+                    .child(Button::new("provider-compatible").small().selected(self.llm.provider == "compatible").label("兼容接口").on_click(cx.listener(|this, _, window, cx| this.choose_provider(true, window, cx))))
+                    .child(Checkbox::new("llm-vision").label("模型支持图像输入").checked(self.llm.vision).on_change(cx.listener(|this, value, _, cx| {
+                        this.llm.vision = *value;
+                        cx.notify();
+                    }))),
+            )
+            .child(model_choices(self, cx))
             .child(
                 div()
                     .flex()
@@ -950,6 +978,7 @@ impl Studio {
                     .gap_2()
                     .child(Button::new("save-llm").label("保存配置").on_click(cx.listener(|this, _, window, cx| this.save_llm(window, cx))))
                     .child(Button::new("list-models").label("读取模型").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.list_models(cx))))
+                    .child(Button::new("test-llm").label("检查连接").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.test_llm(cx))))
                     .child(Button::new("english").primary().label("生成英文场次").loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))
                     .child(Button::new("apply-english").label("应用选中项").on_click(cx.listener(|this, _, window, cx| this.apply_english(window, cx)))),
             )
@@ -1900,36 +1929,341 @@ impl Studio {
         bar
     }
 
+    fn model_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut column = div().flex().flex_col().gap(px(8.)).pt(px(8.));
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .gap(px(8.))
+            .child(plain_btn(Button::new("search-session").label("联网核对").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_session(cx)))));
+        if !self.intake_files.is_empty() {
+            let count = self.intake_files.len();
+            row = row.child(primary_btn(Button::new("recognize-images").label("用模型识别").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_intake(cx))))).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(format!("已选择 {count} 张图片")));
+        }
+        if self.pending_import.is_some() && !self.pending_cd {
+            row = row.child(plain_btn(Button::new("apply-import").label("填入识别结果").on_click(cx.listener(|this, _, window, cx| this.apply_pending(window, cx)))));
+        }
+        column = column.child(row);
+        for (index, hit) in self.session_hits.iter().enumerate() {
+            let title = [hit.name.as_str(), hit.performer.as_str(), hit.date.as_str(), hit.venue.as_str()].into_iter().filter(|item| !item.is_empty()).collect::<Vec<_>>().join(" · ");
+            let sources = hit.sources.iter().map(|source| format!("{} {}", source.title, source.url)).collect::<Vec<_>>().join(" ; ");
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(plain_btn(Button::new(SharedString::from(format!("use-session-{index}"))).label("使用此场次").on_click(cx.listener(move |this, _, window, cx| this.apply_session(index, window, cx)))))
+                    .child(div().text_size(px(12.)).child(format!("{title}  {sources}"))),
+            );
+        }
+        for (index, hit) in self.name_hits.iter().enumerate() {
+            let label = if hit.composer.is_empty() { hit.title.clone() } else { format!("{} - {}", hit.composer, hit.title) };
+            column = column.child(plain_btn(Button::new(SharedString::from(format!("use-name-{index}"))).label(format!("采用 {label}")).on_click(cx.listener(move |this, _, window, cx| this.apply_name(index, window, cx)))));
+        }
+        column
+    }
+
     fn import_program(&mut self, session_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(file) = rfd::FileDialog::new().set_title(if session_only { "识别场次信息" } else { "导入节目单" }).add_filter("文本", &["txt", "md"]).pick_file() else {
+        let Some(files) = rfd::FileDialog::new().set_title(if session_only { "识别场次信息" } else { "导入节目单" }).add_filter("图片或文本", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "txt", "md"]).pick_files() else {
             return;
         };
-        let bytes = match std::fs::read(&file) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.show_error(error.to_string(), cx);
+        let text = files.iter().filter(|path| text_file(path)).cloned().collect::<Vec<_>>();
+        let images = files.iter().filter(|path| !text_file(path)).cloned().collect::<Vec<_>>();
+        if !text.is_empty() && !images.is_empty() || text.len() > 1 {
+            self.show_error("请单独选择一个文本, 或一次选择多张图片.", cx);
+            return;
+        }
+        if let Some(file) = text.first() {
+            let bytes = match std::fs::read(file) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.show_error(error.to_string(), cx);
+                    return;
+                }
+            };
+            self.intake_files.clear();
+            let parsed = program::parse_program(&program::decode_text(&bytes));
+            let (fields, tracks) = {
+                let Some(project) = self.project_mut() else {
+                    return;
+                };
+                program::apply_program(project, &parsed, !session_only)
+            };
+            if fields == 0 && tracks == 0 {
+                self.show_error("没有识别到场次或曲目. 用「演奏家: 姓名」这样的行, 曲目用「1. 曲名」.", cx);
                 return;
             }
-        };
-        let parsed = program::parse_program(&program::decode_text(&bytes));
-        let (fields, tracks) = {
-            let Some(project) = self.project_mut() else {
-                return;
-            };
-            program::apply_program(project, &parsed, !session_only)
-        };
-        if fields == 0 && tracks == 0 {
-            self.show_error("没有识别到场次或曲目. 用「演奏家: 姓名」这样的行, 曲目用「1. 曲名」.", cx);
+            if tracks > 0 {
+                self.track_index = Some(0);
+                self.track_picks.clear();
+            }
+            self.push(window, cx);
+            self.mark_dirty(cx);
+            self.status = if tracks > 0 { format!("已填写 {fields} 项场次信息, 导入 {tracks} 条曲目.").into() } else { format!("已填写 {fields} 项场次信息.").into() };
             return;
         }
-        if tracks > 0 {
-            self.track_index = Some(0);
-            self.track_picks.clear();
+        if images.len() > 8 {
+            self.show_error("每次最多向视觉模型发送 8 张图片.", cx);
+            return;
         }
+        self.intake_files = images;
+        self.intake_session = session_only;
+        self.status = format!("已选择 {} 张图片. 可点「用模型识别」, 场次也可以「联网核对」.", self.intake_files.len()).into();
+        cx.notify();
+    }
+
+    fn recognize_intake(&mut self, cx: &mut Context<Self>) {
+        let files = self.intake_files.clone();
+        let session = self.intake_session;
+        if files.is_empty() {
+            self.show_error("请先选择图片.", cx);
+            return;
+        }
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::recognize(&config, if session { "session" } else { "program" }, "", &files) {
+            Ok(text) => JobMsg::Import { cd: false, include_tracks: !session, text },
+            Err(error) => JobMsg::Done { operation: "模型识别", result: Err(error.to_string()) },
+        });
+    }
+
+    fn search_session(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project().cloned() else {
+            self.show_error("请先打开项目.", cx);
+            return;
+        };
+        let clues = serde_json::json!({
+            "name": project.name,
+            "performer": project.performer,
+            "conductor": project.conductor,
+            "orchestra": project.orchestra,
+            "composer": project.composer,
+            "date": project.date,
+            "city": project.city,
+            "venue": project.venue
+        });
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::search_session(&config, &clues) {
+            Ok(items) => JobMsg::Sessions(Ok(items)),
+            Err(error) => JobMsg::Sessions(Err(error.to_string())),
+        });
+    }
+
+    fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(imported) = self.pending_import.clone() else {
+            return;
+        };
+        if self.pending_cd {
+            self.fill_cd_import(&imported, window, cx);
+        } else {
+            self.pull(cx);
+            let include = self.pending_tracks;
+            let (fields, tracks) = {
+                let Some(project) = self.project_mut() else { return };
+                program::apply_program(project, &imported, include)
+            };
+            if tracks > 0 {
+                self.track_index = Some(0);
+                self.track_picks.clear();
+            }
+            self.push(window, cx);
+            self.mark_dirty(cx);
+            self.status = format!("已填入 {fields} 项信息和 {tracks} 条曲目.").into();
+        }
+        self.pending_import = None;
+        self.pending_cd = false;
+        cx.notify();
+    }
+
+    fn fill_cd_import(&mut self, imported: &program::ImportedProgram, window: &mut Window, cx: &mut Context<Self>) {
+        if text(&self.cd_title, cx).trim().is_empty() {
+            if let Some(value) = imported.name.as_deref() {
+                set_text(&self.cd_title, value, window, cx);
+            }
+        }
+        if text(&self.cd_artist, cx).trim().is_empty() {
+            if let Some(value) = imported.performer.as_deref() {
+                set_text(&self.cd_artist, value, window, cx);
+            }
+        }
+        if text(&self.cd_composer, cx).trim().is_empty() {
+            if let Some(value) = imported.composer.as_deref() {
+                set_text(&self.cd_composer, value, window, cx);
+            }
+        }
+        if text(&self.cd_date, cx).trim().is_empty() {
+            if let Some(value) = imported.date.as_deref() {
+                set_text(&self.cd_date, value, window, cx);
+            }
+        }
+        if !imported.tracks.is_empty() {
+            let album_artist = imported.performer.clone().unwrap_or_default();
+            let album_composer = imported.composer.clone().unwrap_or_default();
+            let rows = imported
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| cue::CueTrack {
+                    number: (index + 1) as u32,
+                    source: String::new(),
+                    path: String::new(),
+                    start: if track.start.is_empty() { "00:00".into() } else { track.start.clone() },
+                    end: track.end.clone(),
+                    title: track.title.clone(),
+                    artist: album_artist.clone(),
+                    composer: if track.composer.is_empty() { album_composer.clone() } else { track.composer.clone() },
+                    filename: String::new(),
+                })
+                .collect::<Vec<_>>();
+            if let Some(disc) = self.cd_disc.and_then(|index| self.cd_discs.get_mut(index)) {
+                disc.rows = rows;
+                disc.issue.clear();
+            } else {
+                self.cd_discs.push(cue::DiscDraft {
+                    number: 1,
+                    label: "模型识别".into(),
+                    cue_path: String::new(),
+                    directory: String::new(),
+                    files: Vec::new(),
+                    album: cue::CueAlbum { title: imported.name.clone().unwrap_or_default(), artist: album_artist, composer: album_composer, date: imported.date.clone().unwrap_or_default(), disc: 1 },
+                    rows,
+                    issue: String::new(),
+                });
+                self.cd_disc = Some(self.cd_discs.len() - 1);
+            }
+            self.load_disc(window, cx);
+        }
+        self.status = "已把模型识别填入 CD 页. 请再核对轨号.".into();
+    }
+
+    fn apply_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.session_hits.get(index).cloned() else { return };
+        self.pull(cx);
+        let Some(project) = self.project_mut() else { return };
+        let write = |slot: &mut String, value: &str| {
+            if !value.trim().is_empty() {
+                *slot = value.trim().to_string();
+            }
+        };
+        write(&mut project.name, &hit.name);
+        write(&mut project.performer, &hit.performer);
+        write(&mut project.conductor, &hit.conductor);
+        write(&mut project.orchestra, &hit.orchestra);
+        write(&mut project.composer, &hit.composer);
+        write(&mut project.date, &hit.date);
+        write(&mut project.city, &hit.city);
+        write(&mut project.venue, &hit.venue);
         self.push(window, cx);
         self.mark_dirty(cx);
-        self.status = if tracks > 0 { format!("已填写 {fields} 项场次信息, 导入 {tracks} 条曲目.").into() } else { format!("已填写 {fields} 项场次信息.").into() };
+        self.status = "已填入核对过的场次. 来源仍显示在下方.".into();
+    }
+
+    fn model_filename(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(track) = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index))).cloned() else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        if track.tags.title.trim().is_empty() {
+            self.show_error("请先填写曲目名.", cx);
+            return;
+        }
+        let request = serde_json::json!({"title": track.tags.title, "composer": track.tags.composer}).to_string();
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::recognize(&config, "filenames", &request, &[]) {
+            Ok(text) => match llm::parse_name_hits(&text) {
+                Ok(items) => JobMsg::Names(Ok(items)),
+                Err(error) => JobMsg::Names(Err(error.to_string())),
+            },
+            Err(error) => JobMsg::Names(Err(error.to_string())),
+        });
+    }
+
+    fn apply_name(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.name_hits.get(index).cloned() else { return };
+        self.pull(cx);
+        let Some(track_index) = self.track_index else { return };
+        {
+            let Some(project) = self.project_mut() else { return };
+            let Some(track) = project.tracks.get_mut(track_index) else { return };
+            track.tags.title = hit.title;
+            if track.tags.composer.trim().is_empty() && !hit.composer.is_empty() {
+                track.tags.composer = hit.composer;
+            }
+        }
+        let filename = {
+            let Some(project) = self.project() else { return };
+            let rule = names::effective_naming(project);
+            let tags = names::track_tags(project, &project.tracks[track_index], track_index);
+            let mut scratch = project.tracks[track_index].clone();
+            scratch.filename.clear();
+            names::filename_for(&rule, &scratch, &tags, track_index)
+        };
+        if let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(track_index)) {
+            if !filename.is_empty() {
+                track.filename = filename;
+            }
+        }
+        self.name_hits.clear();
+        self.push_track(window, cx);
+        self.mark_dirty(cx);
+        self.status = "已采用模型曲名.".into();
+    }
+
+    fn model_movements(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(track) = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index))).cloned() else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        let composer = self.project().map(|project| if track.tags.composer.trim().is_empty() { project.composer.clone() } else { track.tags.composer.clone() }).unwrap_or_default();
+        let request = serde_json::json!({"title": track.tags.title, "composer": composer}).to_string();
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::recognize(&config, "movements", &request, &[]) {
+            Ok(text) => match llm::parse_movements(&text) {
+                Ok((_, _, parts)) => JobMsg::Parts(Ok(parts.join(" | "))),
+                Err(error) => JobMsg::Parts(Err(error.to_string())),
+            },
+            Err(error) => JobMsg::Parts(Err(error.to_string())),
+        });
+    }
+
+    fn model_cd(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project().cloned() else {
+            self.show_error("请先打开项目, 并选择套装封面或封底.", cx);
+            return;
+        };
+        let files = [project.cover_path, project.back_cover_path].into_iter().filter(|path| !path.trim().is_empty()).map(std::path::PathBuf::from).collect::<Vec<_>>();
+        if files.is_empty() {
+            self.show_error("请先选择套装封面或封底.", cx);
+            return;
+        }
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::recognize(&config, "cd", "", &files) {
+            Ok(text) => JobMsg::Import { cd: true, include_tracks: true, text },
+            Err(error) => JobMsg::Done { operation: "模型识别封面", result: Err(error.to_string()) },
+        });
+    }
+
+    fn choose_provider(&mut self, compatible: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.llm.provider = if compatible { "compatible".into() } else { "deepseek".into() };
+        if !compatible {
+            set_text(&self.llm_base, "https://api.deepseek.com", window, cx);
+            if text(&self.llm_model, cx).trim().is_empty() {
+                set_text(&self.llm_model, "deepseek-flash", window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn test_llm(&mut self, cx: &mut Context<Self>) {
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::test_connection(&config) {
+            Ok(text) => JobMsg::Done { operation: "检查连接", result: Ok(text) },
+            Err(error) => JobMsg::Done { operation: "检查连接", result: Err(error.to_string()) },
+        });
     }
 
     fn match_filenames(&mut self, only_current: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -2612,8 +2946,8 @@ impl Studio {
         }
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         self.spawn_job(cx, move || match llm::list_models(&config) {
-            Ok(names) => JobMsg::Done { operation: "读取模型", result: Ok(names.join(", ")) },
-            Err(error) => JobMsg::Done { operation: "读取模型", result: Err(error.to_string()) },
+            Ok(names) => JobMsg::Models(Ok(names)),
+            Err(error) => JobMsg::Models(Err(error.to_string())),
         });
     }
 
@@ -2882,7 +3216,32 @@ fn read_llm(studio: &Studio, cx: &gpui_kit::App) -> LlmConfig {
         base_url: text(&studio.llm_base, cx),
         model: text(&studio.llm_model, cx),
         api_key: text(&studio.llm_key, cx),
+        provider: if studio.llm.provider == "compatible" { "compatible".into() } else { "deepseek".into() },
+        vision: studio.llm.vision,
     }
+}
+
+fn text_file(path: &std::path::Path) -> bool {
+    matches!(path.extension().and_then(|item| item.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "txt" | "md")
+}
+
+fn model_choices(studio: &Studio, cx: &mut Context<Studio>) -> gpui_kit::Div {
+    let mut row = div().flex().flex_col().gap(px(8.));
+    let mut shown = llm::PRESET_MODELS.iter().map(|item| (*item).to_string()).collect::<Vec<_>>();
+    for name in studio.model_choices.iter().take(40) {
+        if !shown.iter().any(|item| item == name) {
+            shown.push(name.clone());
+        }
+    }
+    for name in shown {
+        let label = name.clone();
+        row = row.child(Button::new(SharedString::from(format!("preset-{name}"))).small().label(label).on_click(cx.listener(move |this, _, window, cx| {
+            set_text(&this.llm_model, &name, window, cx);
+            this.status = format!("已选择模型 {name}.").into();
+            cx.notify();
+        })));
+    }
+    row
 }
 
 fn group_block(project: &Project, cx: &mut Context<Studio>) -> impl IntoElement {
