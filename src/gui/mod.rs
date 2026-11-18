@@ -244,6 +244,8 @@ pub struct Studio {
     cover_title: Entity<InputState>,
     cover_performer: Entity<InputState>,
     cover_detail: Entity<InputState>,
+    page_scroll: gpui_kit::ScrollHandle,
+    page_scroll_grab: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     save_task: Option<Task<()>>,
     job_task: Option<Task<()>>,
     progress_task: Option<Task<()>>,
@@ -534,6 +536,8 @@ impl Studio {
             cover_title,
             cover_performer,
             cover_detail,
+            page_scroll: gpui_kit::ScrollHandle::new(),
+            page_scroll_grab: std::rc::Rc::new(std::cell::Cell::new(None)),
             save_task: None,
             job_task: None,
             progress_task: None,
@@ -1890,10 +1894,196 @@ impl Render for Studio {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .child(div().id("page-body").flex_1().min_h(px(0.)).overflow_y_scroll().px(px(30.)).py(px(24.)).child(div().w_full().max_w(px(1540.)).child(page)))
+                    .child(
+                        div()
+                            .id("page-body")
+                            .relative()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .child(
+                                div()
+                                    .id("page-scroll")
+                                    .absolute()
+                                    .top(px(0.))
+                                    .left(px(0.))
+                                    .right(px(0.))
+                                    .bottom(px(0.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.page_scroll)
+                                    .px(px(30.))
+                                    .py(px(24.))
+                                    .child(div().w_full().max_w(px(1540.)).child(page)),
+                            )
+                            .child(vertical_scrollbar(self.page_scroll.clone(), self.page_scroll_grab.clone(), cx.entity())),
+                    )
                     .child(footer),
             )
     }
+}
+
+fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<f32>>>, entity: Entity<Studio>) -> impl IntoElement {
+    use gpui_kit::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, canvas, fill};
+    let scroll_move = scroll.clone();
+    let scroll_up = scroll.clone();
+    let grab_move = grab.clone();
+    let grab_up = grab.clone();
+    let entity_move = entity.clone();
+    let entity_up = entity.clone();
+    div().absolute().top(px(6.)).bottom(px(6.)).right(px(4.)).w(px(12.)).child(canvas(
+        |_, _, _| (),
+        move |fallback, _, window, cx| {
+            let bounds = bar_track(&scroll, fallback);
+            let metrics = bar_metrics(&scroll, px_f(bounds.size.height));
+            window.paint_quad(fill(bounds, rgb(0xe7e1f2)));
+            if let Some(metrics) = metrics {
+                let thumb = thumb_bounds(bounds, metrics);
+                let color = if grab.get().is_some() { rgb(0x5a3da8) } else { rgb(0xb7a6de) };
+                window.paint_quad(fill(thumb_paint(bounds, thumb), color));
+            }
+            let scroll_down = scroll.clone();
+            let grab_down = grab.clone();
+            let entity_down = entity.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                if !phase.capture() || event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                    return;
+                }
+                let Some(metrics) = bar_metrics(&scroll_down, px_f(bounds.size.height)) else { return };
+                cx.stop_propagation();
+                let thumb = thumb_bounds(bounds, metrics);
+                let mouse = px_f(event.position.y);
+                let grab_at = if bounds_contains_y(thumb, mouse) { mouse - px_f(thumb.origin.y) } else { metrics.thumb / 2. };
+                grab_down.set(Some(grab_at));
+                scroll_down.start_drag();
+                apply_bar_drag(&scroll_down, bounds, metrics, grab_at, mouse);
+                let _ = entity_down.update(cx, |_, cx| cx.notify());
+            });
+            let scroll_move = scroll_move.clone();
+            let grab_move = grab_move.clone();
+            let entity_move = entity_move.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if !phase.capture() {
+                    return;
+                }
+                if !event.dragging() {
+                    if grab_move.take().is_some() {
+                        scroll_move.end_drag();
+                        let _ = entity_move.update(cx, |_, cx| cx.notify());
+                    }
+                    return;
+                }
+                let Some(grab_at) = grab_move.get() else { return };
+                let Some(metrics) = bar_metrics(&scroll_move, px_f(bounds.size.height)) else { return };
+                cx.stop_propagation();
+                apply_bar_drag(&scroll_move, bounds, metrics, grab_at, px_f(event.position.y));
+                let _ = entity_move.update(cx, |_, cx| cx.notify());
+            });
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if !phase.capture() || event.button != MouseButton::Left {
+                    return;
+                }
+                if grab_up.take().is_some() {
+                    cx.stop_propagation();
+                    scroll_up.end_drag();
+                    let _ = entity_up.update(cx, |_, cx| cx.notify());
+                }
+            });
+        },
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct BarMetrics {
+    range: f32,
+    thumb: f32,
+    offset: f32,
+}
+
+fn bar_track(scroll: &gpui_kit::ScrollHandle, fallback: gpui_kit::Bounds<gpui_kit::Pixels>) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let viewport = scroll.viewport_bounds();
+    if viewport.size.height.as_f32() < 2. || viewport.size.width.as_f32() < 2. {
+        return fallback;
+    }
+    let width = px(12.);
+    gpui_kit::Bounds {
+        origin: gpui_kit::point(viewport.origin.x + viewport.size.width - width - px(4.), viewport.origin.y + px(6.)),
+        size: gpui_kit::size(width, (viewport.size.height - px(12.)).max(px(0.))),
+    }
+}
+
+fn bar_metrics(scroll: &gpui_kit::ScrollHandle, track: f32) -> Option<BarMetrics> {
+    let range = -px_f(scroll.max_offset().y);
+    if track <= 1. || range <= 1. {
+        return None;
+    }
+    Some(BarMetrics { range, thumb: thumb_span(track, range), offset: px_f(scroll.offset().y) })
+}
+
+fn thumb_bounds(track: gpui_kit::Bounds<gpui_kit::Pixels>, metrics: BarMetrics) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let track_h = px_f(track.size.height);
+    let thumb = metrics.thumb.min(track_h);
+    let travel = (track_h - thumb).max(0.);
+    let progress = (-metrics.offset / metrics.range).clamp(0., 1.);
+    gpui_kit::Bounds {
+        origin: gpui_kit::point(track.origin.x, track.origin.y + px(travel * progress)),
+        size: gpui_kit::size(track.size.width, px(thumb)),
+    }
+}
+
+fn thumb_paint(track: gpui_kit::Bounds<gpui_kit::Pixels>, thumb: gpui_kit::Bounds<gpui_kit::Pixels>) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    gpui_kit::Bounds {
+        origin: gpui_kit::point(track.origin.x + px(2.), thumb.origin.y),
+        size: gpui_kit::size((track.size.width - px(4.)).max(px(4.)), thumb.size.height),
+    }
+}
+
+fn bounds_contains_y(bounds: gpui_kit::Bounds<gpui_kit::Pixels>, y: f32) -> bool {
+    let top = px_f(bounds.origin.y);
+    y >= top && y <= top + px_f(bounds.size.height)
+}
+
+fn apply_bar_drag(scroll: &gpui_kit::ScrollHandle, track: gpui_kit::Bounds<gpui_kit::Pixels>, metrics: BarMetrics, grab: f32, mouse_y: f32) {
+    let offset = offset_for_thumb_drag(px_f(track.size.height), metrics.range, metrics.thumb, grab, mouse_y, px_f(track.origin.y));
+    let current = scroll.offset();
+    scroll.set_offset(gpui_kit::point(current.x, px(clamp_scroll(offset, -metrics.range))));
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::{clamp_scroll, offset_for_thumb_drag, thumb_span};
+
+    #[test]
+    fn dragging_past_the_bar_reaches_the_ends() {
+        let view = 200.;
+        let range = 400.;
+        let thumb = thumb_span(view, range);
+        assert!((thumb - (view * view / (view + range))).abs() < 0.01);
+        assert!(offset_for_thumb_drag(view, range, thumb, 0., 0., 0.).abs() < 0.01);
+        assert!((offset_for_thumb_drag(view, range, thumb, 12., 4000., 0.) + range).abs() < 0.01);
+        assert!(offset_for_thumb_drag(view, range, thumb, 12., -800., 40.).abs() < 0.01);
+        assert_eq!(clamp_scroll(-20., -400.), -20.);
+        assert_eq!(clamp_scroll(-900., -400.), -400.);
+        assert_eq!(clamp_scroll(30., -400.), 0.);
+    }
+}
+
+fn px_f(value: gpui_kit::Pixels) -> f32 {
+    value.as_f32()
+}
+
+fn thumb_span(view: f32, range: f32) -> f32 {
+    (view * view / (view + range)).clamp(28., view)
+}
+
+fn offset_for_thumb_drag(view: f32, range: f32, thumb: f32, grab: f32, mouse_y: f32, track_y: f32) -> f32 {
+    let travel = (view - thumb).max(1.);
+    let ratio = ((mouse_y - grab - track_y) / travel).clamp(0., 1.);
+    -range * ratio
+}
+
+fn clamp_scroll(offset: f32, limit: f32) -> f32 {
+    let low = limit.min(0.);
+    let high = limit.max(0.);
+    offset.clamp(low, high)
 }
 
 pub fn run() {
