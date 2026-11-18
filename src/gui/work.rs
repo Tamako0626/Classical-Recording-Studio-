@@ -683,7 +683,7 @@ impl Studio {
                 cx.notify();
             }))))
             .child(super::field("MusicBrainz", &self.mb_query))
-            .child(Button::new("search-work").small().label("检索作品").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx)))));
+            .child(Button::new("search-work").small().label("检索作品").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx))));
         let mut column = div().flex().flex_col().gap(px(8.)).child(row);
         if self.fx_open {
             column = column.child(self.fx_panel(cx));
