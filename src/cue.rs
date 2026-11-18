@@ -1049,7 +1049,8 @@ FILE "disc.wav" WAVE
         assert_eq!(named, "02-01 - 第二十一钢琴奏鸣曲");
         assert!(crate::names::output_filename_valid(&named));
 
-        let again = import_discs(&mut project, &discs, CdPlacement::NextDisc, &project.name, "内田光子", "贝多芬", "2012");
+        let album_name = project.name.clone();
+        let again = import_discs(&mut project, &discs, CdPlacement::NextDisc, &album_name, "内田光子", "贝多芬", "2012");
         assert_eq!(again.imported, 9);
         assert_eq!(project.tracks.len(), 20);
         assert_eq!(project.disc_count, 6);

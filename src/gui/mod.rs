@@ -1923,6 +1923,7 @@ impl Render for Studio {
 }
 
 fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<f32>>>) -> impl IntoElement {
+    use gpui_kit::base::ScrollbarHandle as _;
     use gpui_kit::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, canvas, fill};
     let scroll_move = scroll.clone();
     let scroll_up = scroll.clone();
@@ -2131,6 +2132,7 @@ fn clamp_scroll(offset: f32, limit: f32) -> f32 {
 }
 
 pub(super) fn defer_dialog<T: Send + 'static>(window: &mut Window, cx: &mut Context<Studio>, dialog: impl FnOnce() -> Option<T> + Send + 'static, apply: impl FnOnce(&mut Studio, Option<T>, &mut Window, &mut Context<Studio>) + Send + 'static) {
+    use gpui_kit::VisualContext as _;
     let view = cx.entity();
     window
         .spawn(cx, async move |cx| {
