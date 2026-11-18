@@ -19,7 +19,12 @@ pub fn search_works(query: &str) -> StudioResult<Vec<WorkHit>> {
         "https://musicbrainz.org/ws/2/work?fmt=json&limit=8&query={}",
         encode(query)
     );
-    let response = ureq::get(&url)
+    let response = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(20))
+        .timeout_write(std::time::Duration::from_secs(20))
+        .build()
+        .get(&url)
         .set("User-Agent", "ClassicalRecordingStudio/0.3 (https://github.com/Tamako0626/Classical-Recording-Studio-)")
         .set("Accept", "application/json")
         .call()

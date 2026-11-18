@@ -713,6 +713,93 @@ pub fn parse_disc_cue_near(cue_path: &Path, files: &[(String, String)], prefer_d
     parse_cue_in(&decode_cue(&bytes), files, prefer_dir)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CdPlacement {
+    Append,
+    Replace,
+    NextDisc,
+}
+
+pub struct CdImportOutcome {
+    pub imported: usize,
+    pub skipped: Vec<String>,
+}
+
+pub fn import_discs(project: &mut crate::model::Project, discs: &[DiscDraft], mode: CdPlacement, album_title: &str, album_artist: &str, album_composer: &str, album_date: &str) -> CdImportOutcome {
+    if project.name.trim().is_empty() {
+        project.name = album_title.to_string();
+    }
+    if project.performer.trim().is_empty() {
+        project.performer = album_artist.to_string();
+    }
+    if project.composer.trim().is_empty() {
+        project.composer = album_composer.to_string();
+    }
+    if project.date.trim().is_empty() {
+        project.date = album_date.to_string();
+    }
+    let shift = match mode {
+        CdPlacement::Replace => {
+            project.tracks.clear();
+            project.sources.clear();
+            project.source_paths.clear();
+            0
+        }
+        CdPlacement::NextDisc => project.tracks.iter().map(|track| track.disc).max().unwrap_or(0),
+        CdPlacement::Append => {
+            let blank = project.tracks.len() == 1 && project.tracks[0].source.is_empty() && project.tracks[0].tags.title.trim().is_empty() && project.tracks[0].parts.is_empty();
+            if blank {
+                project.tracks.clear();
+            }
+            0
+        }
+    };
+    let mut imported = 0usize;
+    let mut skipped = Vec::new();
+    for disc in discs {
+        if disc.rows.is_empty() {
+            skipped.push(format!("碟 {:02}", disc.number));
+            continue;
+        }
+        let number = disc.number.saturating_add(shift);
+        for row in &disc.rows {
+            let source = if row.source.is_empty() { String::new() } else { crate::names::source_id(number, &row.source) };
+            if !source.is_empty() && !project.sources.iter().any(|item| item == &source) {
+                project.sources.push(source.clone());
+            }
+            if !source.is_empty() && !row.path.is_empty() {
+                project.source_paths.insert(source.clone(), row.path.clone());
+            }
+            let mut track = crate::model::Track::blank();
+            track.source = source;
+            track.disc = number;
+            track.start = if row.start.is_empty() { "00:00".into() } else { row.start.clone() };
+            track.end = row.end.clone();
+            track.filename = row.filename.clone();
+            track.tags.title = row.title.clone();
+            track.tags.artist = if row.artist.is_empty() { album_artist.to_string() } else { row.artist.clone() };
+            track.tags.composer = if row.composer.is_empty() { album_composer.to_string() } else { row.composer.clone() };
+            track.tags.album = project.name.clone();
+            track.tags.date = album_date.to_string();
+            if number > 0 {
+                track.tags.track = format!("{:02}", row.number);
+                track.tags.disc = format!("{:02}", number);
+            }
+            project.tracks.push(track);
+            imported += 1;
+        }
+    }
+    if project.tracks.is_empty() {
+        project.tracks.push(crate::model::Track::blank());
+    }
+    let max_disc = project.tracks.iter().map(|track| track.disc).max().unwrap_or(0);
+    project.disc_count = if mode == CdPlacement::Replace { max_disc } else { project.disc_count.max(max_disc) };
+    if project.disc_count > 1 && (project.naming_rule.trim().is_empty() || project.naming_rule.trim() == crate::names::DEFAULT_NAMING) {
+        project.naming_rule = "{Disc}-{Track} - {Title}".into();
+    }
+    CdImportOutcome { imported, skipped }
+}
+
 fn assign_disc_numbers(drafts: &mut [DiscDraft]) {
     let mut used = std::collections::BTreeSet::new();
     for draft in drafts.iter_mut() {
@@ -860,5 +947,134 @@ FILE "disc.wav" WAVE
         let discs = collect_discs(&entries);
         assert_eq!(discs.len(), 1);
         assert!(!discs[0].issue.is_empty());
+    }
+
+    #[test]
+    fn a_box_set_imports_names_and_expands_movements() {
+        let root = std::env::temp_dir().join(format!("crs-box-{}", uuid::Uuid::new_v4()));
+        let _cleanup = TempTree(root.clone());
+        let titles = [
+            ["第三十钢琴奏鸣曲", "第三十一钢琴奏鸣曲", "第三十二钢琴奏鸣曲"],
+            ["第二十一钢琴奏鸣曲", "第二十二钢琴奏鸣曲", "第二十三钢琴奏鸣曲"],
+            ["第一钢琴奏鸣曲", "第二钢琴奏鸣曲", "第三钢琴奏鸣曲"],
+        ];
+        for (index, disc_titles) in titles.iter().enumerate() {
+            let number = index as u32 + 1;
+            let folder = root.join(format!("CD{number}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("image.flac"), [b'f', b'L', b'a', b'C', number as u8]).unwrap();
+            let cue = box_cue(number, disc_titles);
+            if number == 3 {
+                let (bytes, _, failed) = encoding_rs::GBK.encode(&cue);
+                assert!(!failed);
+                std::fs::write(folder.join("disc.cue"), bytes.as_ref()).unwrap();
+            } else {
+                std::fs::write(folder.join("disc.cue"), cue).unwrap();
+            }
+        }
+        let loose = root.join("散曲");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::write(loose.join("extra.flac"), b"loose").unwrap();
+
+        let discs = collect_discs(&gather_entries(&[root]));
+        assert_eq!(discs.len(), 4, "{discs:?}");
+        let ready: Vec<_> = discs.iter().filter(|disc| disc.issue.is_empty()).collect();
+        let skipped_drafts: Vec<_> = discs.iter().filter(|disc| !disc.issue.is_empty()).collect();
+        assert_eq!(ready.len(), 3, "{discs:?}");
+        assert_eq!(skipped_drafts.len(), 1);
+        assert_eq!(skipped_drafts[0].issue, "未配对 CUE.");
+        assert!(skipped_drafts[0].rows.is_empty());
+        for disc in &ready {
+            assert_eq!(disc.rows.len(), 3, "{}", disc.label);
+            assert!(disc.rows.iter().all(|row| row.path.ends_with("image.flac") && std::path::Path::new(&row.path).exists()));
+            assert_eq!(disc.rows[0].path, disc.rows[1].path);
+            assert!(!disc.rows[0].end.is_empty());
+            assert!(disc.rows[2].end.is_empty());
+        }
+        let paths: std::collections::BTreeSet<_> = ready.iter().map(|disc| disc.rows[0].path.as_str()).collect();
+        assert_eq!(paths.len(), 3);
+
+        let albums: Vec<_> = ready.iter().map(|disc| disc.album.clone()).collect();
+        let mut project = crate::model::Project::blank();
+        let first = import_discs(&mut project, &discs, CdPlacement::Replace, &suite_title(&albums), "内田光子", "贝多芬", "2012");
+        assert_eq!(first.imported, 9, "{:?}", first.skipped);
+        assert_eq!(first.skipped, vec!["碟 04".to_string()]);
+        assert_eq!(project.tracks.len(), 9);
+        assert_eq!(project.disc_count, 3);
+        assert_eq!(project.name, "贝多芬钢琴奏鸣曲");
+        assert_eq!(project.naming_rule, "{Disc}-{Track} - {Title}");
+        assert_eq!(project.tracks.iter().map(|track| track.disc).collect::<Vec<_>>(), vec![1, 1, 1, 2, 2, 2, 3, 3, 3]);
+        for track in &project.tracks {
+            let path = project.source_paths.get(&track.source).expect("录音路径");
+            assert!(std::path::Path::new(path).exists(), "{path}");
+            assert_eq!(track.tags.composer, "贝多芬");
+            assert_eq!(track.tags.artist, "内田光子");
+        }
+
+        let program = crate::program::parse_program("演奏家: 内田光子\n日期: 2012-11-18\n城市: 伦敦\n音乐厅: 皇家节日音乐厅\n作曲家: 贝多芬\n");
+        let (fields, replaced) = crate::program::apply_program(&mut project, &program, false);
+        assert!(fields >= 4);
+        assert_eq!(replaced, 0);
+        assert_eq!(project.tracks.len(), 9);
+        assert_eq!(project.city, "伦敦");
+        assert_eq!(project.venue, "皇家节日音乐厅");
+        assert_eq!(project.date, "2012-11-18");
+
+        let hits = crate::llm::parse_name_hits(r#"[{"title":"第三十钢琴奏鸣曲 E大调","composer":"路德维希·范·贝多芬"}]"#).unwrap();
+        assert_eq!(hits.len(), 1);
+        project.tracks[0].tags.title = hits[0].title.clone();
+        project.tracks[0].tags.composer = hits[0].composer.clone();
+        let (work, composer, parts) = crate::llm::parse_movements(r#"{"title":"第三十钢琴奏鸣曲","composer":"贝多芬","parts":[{"number":"1","name":"Vivace ma non troppo"},{"number":"2","name":"Prestissimo"},{"number":"3","name":"Andante molto cantabile ed espressivo"}]}"#).unwrap();
+        assert_eq!(work, "第三十钢琴奏鸣曲");
+        assert_eq!(composer, "贝多芬");
+        let expanded = crate::program::expand_movements(&project.tracks[0], &parts);
+        assert_eq!(expanded.len(), 3);
+        assert_eq!(expanded[0].disc, 1);
+        assert_eq!(expanded[0].source, project.tracks[0].source);
+        assert!(expanded[0].end.is_empty());
+        assert_eq!(expanded[2].end, project.tracks[0].end);
+        let mut rest = project.tracks.split_off(1);
+        project.tracks = expanded;
+        project.tracks.append(&mut rest);
+        assert_eq!(project.tracks.len(), 11);
+
+        let rule = crate::names::effective_naming(&project);
+        assert_eq!(rule, "{Disc}-{Track} - {Title}");
+        let movement = crate::names::filename_for(&rule, &project.tracks[0], &crate::names::track_tags(&project, &project.tracks[0], 0), 0);
+        assert_eq!(movement, "01-01 - 1. Vivace ma non troppo");
+        let mut sample = project.tracks[5].clone();
+        assert!(sample.filename.contains("第二十一钢琴奏鸣曲"), "{}", sample.filename);
+        sample.filename.clear();
+        let named = crate::names::filename_for(&rule, &sample, &crate::names::track_tags(&project, &sample, 5), 5);
+        assert_eq!(named, "02-01 - 第二十一钢琴奏鸣曲");
+        assert!(crate::names::output_filename_valid(&named));
+
+        let again = import_discs(&mut project, &discs, CdPlacement::NextDisc, &project.name, "内田光子", "贝多芬", "2012");
+        assert_eq!(again.imported, 9);
+        assert_eq!(project.tracks.len(), 20);
+        assert_eq!(project.disc_count, 6);
+        assert_eq!(project.tracks[11].disc, 4);
+        assert_eq!(project.tracks[19].disc, 6);
+        let mut later_track = project.tracks[11].clone();
+        later_track.filename.clear();
+        let later = crate::names::filename_for(&crate::names::effective_naming(&project), &later_track, &crate::names::track_tags(&project, &later_track, 11), 11);
+        assert_eq!(later, "04-01 - 第三十钢琴奏鸣曲");
+    }
+
+    struct TempTree(std::path::PathBuf);
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn box_cue(number: u32, titles: &[&str; 3]) -> String {
+        format!(
+            "TITLE \"贝多芬钢琴奏鸣曲 (CD{number})\"\nPERFORMER \"内田光子\"\nREM COMPOSER 贝多芬\nREM DATE 2012\nREM DISCNUMBER {number}\nFILE \"image.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"{t0}\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"{t1}\"\n    INDEX 01 17:40:00\n  TRACK 03 AUDIO\n    TITLE \"{t2}\"\n    INDEX 01 35:05:00\n",
+            t0 = titles[0],
+            t1 = titles[1],
+            t2 = titles[2],
+        )
     }
 }

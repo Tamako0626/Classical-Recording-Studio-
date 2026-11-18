@@ -44,6 +44,14 @@ impl Default for LlmConfig {
     }
 }
 
+fn http() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(45))
+        .timeout_write(std::time::Duration::from_secs(20))
+        .build()
+}
+
 fn completions_url(base: &str) -> String {
     let base = base.trim().trim_end_matches('/');
     if base.ends_with("/chat/completions") {
@@ -184,7 +192,7 @@ fn complete(config: &LlmConfig, system: &str, user: Value, max_tokens: u32, extr
             body[key] = value.clone();
         }
     }
-    let response = ureq::post(&completions_url(&config.base_url))
+    let response = http().post(&completions_url(&config.base_url))
         .set("Authorization", &format!("Bearer {}", config.api_key.trim()))
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -213,7 +221,7 @@ pub fn list_models(config: &LlmConfig) -> StudioResult<Vec<String>> {
         return Err(StudioError::new("请先填写 API Key."));
     }
     remote_base_allowed(&config.base_url)?;
-    let response = ureq::get(&models_url(&config.base_url))
+    let response = http().get(&models_url(&config.base_url))
         .set("Authorization", &format!("Bearer {}", config.api_key.trim()))
         .set("Accept", "application/json")
         .call()

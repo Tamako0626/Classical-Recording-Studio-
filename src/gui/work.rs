@@ -191,7 +191,7 @@ impl Studio {
                             .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("或上传现成封面 · PNG / JPG / WebP / HEIC / HEIF"))
                             .child(file_slot("pick-cover-file", cover_name, cx.listener(|this, _, window, cx| this.pick_cover(false, window, cx)))),
                     )
-                    .child(quiet_btn(Button::new("download-cover").label("下载当前封面").on_click(cx.listener(|this, _, _, cx| this.download_cover(cx)))))
+                    .child(quiet_btn(Button::new("download-cover").label("下载当前封面").on_click(cx.listener(|this, _, window, cx| this.download_cover(window, cx)))))
                     .child(quiet_btn(Button::new("clear-cover").label("移除封面").on_click(cx.listener(|this, _, _, cx| this.clear_cover(false, cx)))))
                     .child(quiet_btn(Button::new("llm-cover").label("识别封面文字").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_cover(cx))))),
             )
@@ -810,8 +810,8 @@ impl Studio {
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(Button::new("video-audio").label("选择音轨").on_click(cx.listener(|this, _, _, cx| this.pick_video_audio(cx))))
-                    .child(Button::new("video-cover").label("选择封面").on_click(cx.listener(|this, _, _, cx| this.pick_video_cover(cx))))
+                    .child(Button::new("video-audio").label("选择音轨").on_click(cx.listener(|this, _, window, cx| this.pick_video_audio(window, cx))))
+                    .child(Button::new("video-cover").label("选择封面").on_click(cx.listener(|this, _, window, cx| this.pick_video_cover(window, cx))))
                     .child(Button::new("video-run").primary().label("生成封面视频").loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, window, cx| this.make_videos(window, cx))))
                     .child(Button::new("video-stop").danger().label("停止").disabled(!self.busy).on_click(cx.listener(|this, _, _, cx| this.stop_job(cx)))),
             )
@@ -854,7 +854,7 @@ impl Studio {
                     .flex_row()
                     .gap(px(8.))
                     .child(plain_btn(Button::new("copy-script").label("复制").disabled(script.is_none()).on_click(cx.listener(|this, _, _, cx| this.copy_script(cx)))))
-                    .child(plain_btn(Button::new("download-script").label("下载 .ps1").disabled(script.is_none()).on_click(cx.listener(|this, _, _, cx| this.download_script(cx))))),
+                    .child(plain_btn(Button::new("download-script").label("下载 .ps1").disabled(script.is_none()).on_click(cx.listener(|this, _, window, cx| this.download_script(window, cx))))),
             )
             .child(super::surface().child(div().text_size(px(16.)).child(chrome::label::SCRIPT_CARD)).child(preview))
             .into_any_element()
@@ -880,7 +880,7 @@ impl Studio {
                     .flex()
                     .flex_row()
                     .gap(px(8.))
-                    .child(Button::new("import-jsonl").small().label("导入 processing-*.jsonl").on_click(cx.listener(|this, _, _, cx| this.import_processing_log(cx))))
+                    .child(Button::new("import-jsonl").small().label("导入 processing-*.jsonl").on_click(cx.listener(|this, _, window, cx| this.import_processing_log(window, cx))))
                     .child(Button::new("clear-logs").small().danger().label("清除当前项目的记录").on_click(cx.listener(|this, _, _, cx| {
                         if let Some(id) = this.project().map(|project| project.id.clone()) {
                             this.workspace.logs.retain(|entry| entry.project_id != id);
@@ -1022,9 +1022,13 @@ impl Studio {
 
     fn add_audio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(files) = rfd::FileDialog::new().set_title("添加录音").add_filter("音频", AUDIO_EXT).pick_files() else {
-            return;
-        };
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("添加录音").add_filter("音频", AUDIO_EXT).pick_files(), |this, files, window, cx| {
+            let Some(files) = files else { return };
+            this.add_audio_files(files, window, cx);
+        });
+    }
+
+    fn add_audio_files(&mut self, files: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.project_mut() else {
             self.show_error("请先建立项目.", cx);
             return;
@@ -1056,7 +1060,7 @@ impl Studio {
         self.mark_dirty(cx);
     }
 
-    fn relink(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn relink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         let Some(source) = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index)).map(|track| track.source.clone())) else {
             self.show_error("请先选择曲目.", cx);
@@ -1066,14 +1070,14 @@ impl Studio {
             self.show_error("当前曲目还没有录音名.", cx);
             return;
         }
-        let Some(file) = rfd::FileDialog::new().set_title("重新关联录音").add_filter("音频", AUDIO_EXT).pick_file() else {
-            return;
-        };
-        if let Some(project) = self.project_mut() {
-            project.source_paths.insert(source, file.display().to_string());
-        }
-        self.status = "已重新关联录音.".into();
-        self.mark_dirty(cx);
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("重新关联录音").add_filter("音频", AUDIO_EXT).pick_file(), move |this, file, _, cx| {
+            let Some(file) = file else { return };
+            if let Some(project) = this.project_mut() {
+                project.source_paths.insert(source, file.display().to_string());
+            }
+            this.status = "已重新关联录音.".into();
+            this.mark_dirty(cx);
+        });
     }
 
     fn tracks_from_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1221,15 +1225,16 @@ impl Studio {
         self.mark_dirty(cx);
     }
 
-    fn pick_cover(&mut self, back: bool, _window: &mut Window, cx: &mut Context<Self>) {
+    fn pick_cover(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(file) = rfd::FileDialog::new().set_title(if back { "选择封底" } else { "选择封面" }).add_filter("图片", &["png", "jpg", "jpeg", "webp", "heic", "heif"]).pick_file() else {
-            return;
-        };
         let binaries = self.ffmpeg.clone();
-        self.spawn_job(cx, move || match crate::coverart::prepare(&file, binaries.as_ref()) {
-            Ok((path, name)) => JobMsg::Artwork { back, path: path.display().to_string(), name },
-            Err(error) => JobMsg::Done { operation: "准备封面", result: Err(error.to_string()) },
+        let title: &'static str = if back { "选择封底" } else { "选择封面" };
+        super::defer_dialog(window, cx, move || rfd::FileDialog::new().set_title(title).add_filter("图片", &["png", "jpg", "jpeg", "webp", "heic", "heif"]).pick_file(), move |this, file, _, cx| {
+            let Some(file) = file else { return };
+            this.spawn_job(cx, move || match crate::coverart::prepare(&file, binaries.as_ref()) {
+                Ok((path, name)) => JobMsg::Artwork { back, path: path.display().to_string(), name },
+                Err(error) => JobMsg::Done { operation: "准备封面", result: Err(error.to_string()) },
+            });
         });
     }
 
@@ -1408,43 +1413,43 @@ impl Studio {
         cx.notify();
     }
 
-    fn relink_tree(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn relink_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(folder) = rfd::FileDialog::new().set_title("选择录音所在文件夹").pick_folder() else {
-            return;
-        };
-        let Some(project) = self.project_mut() else {
-            self.show_error("请先建立项目.", cx);
-            return;
-        };
-        match export::relink_directory(project, &folder) {
-            Ok(count) => self.status = format!("已重新关联 {count} 个录音.").into(),
-            Err(error) => self.show_error(error.to_string(), cx),
-        }
-        self.mark_dirty(cx);
-    }
-
-    fn choose_root(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.pull(cx);
-        let Some(folder) = rfd::FileDialog::new().set_title("选择素材根目录").pick_folder() else {
-            return;
-        };
-        let Some(project) = self.project_mut() else {
-            self.show_error("请先建立项目.", cx);
-            return;
-        };
-        project.source_root = folder.display().to_string();
-        for path in project.source_paths.values_mut() {
-            let file = std::path::PathBuf::from(path.as_str());
-            if let Ok(relative) = file.strip_prefix(&folder) {
-                *path = relative.to_string_lossy().replace('\\', "/");
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择录音所在文件夹").pick_folder(), |this, folder, _, cx| {
+            let Some(folder) = folder else { return };
+            let Some(project) = this.project_mut() else {
+                this.show_error("请先建立项目.", cx);
+                return;
+            };
+            match export::relink_directory(project, &folder) {
+                Ok(count) => this.status = format!("已重新关联 {count} 个录音.").into(),
+                Err(error) => this.show_error(error.to_string(), cx),
             }
-        }
-        self.status = format!("素材根目录 {}", folder.display()).into();
-        self.mark_dirty(cx);
+            this.mark_dirty(cx);
+        });
     }
 
-    fn export_album(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn choose_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择素材根目录").pick_folder(), |this, folder, _, cx| {
+            let Some(folder) = folder else { return };
+            let Some(project) = this.project_mut() else {
+                this.show_error("请先建立项目.", cx);
+                return;
+            };
+            project.source_root = folder.display().to_string();
+            for path in project.source_paths.values_mut() {
+                let file = std::path::PathBuf::from(path.as_str());
+                if let Ok(relative) = file.strip_prefix(&folder) {
+                    *path = relative.to_string_lossy().replace('\\', "/");
+                }
+            }
+            this.status = format!("素材根目录 {}", folder.display()).into();
+            this.mark_dirty(cx);
+        });
+    }
+
+    fn export_album(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         if self.busy {
             return;
@@ -1470,21 +1475,21 @@ impl Studio {
                 return;
             }
         };
-        let Some(parent) = rfd::FileDialog::new().set_title("选择导出位置").pick_folder() else {
-            return;
-        };
         let note = plan.note.clone();
-        self.cancel.reset();
-        let cancel = self.cancel.clone();
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择导出位置").pick_folder(), move |this, parent, _, cx| {
+        let Some(parent) = parent else { return };
+        this.cancel.reset();
+        let cancel = this.cancel.clone();
         let (tx, rx) = async_channel::unbounded();
-        self.follow(rx, cx);
-        self.spawn_job(cx, move || match export::export_album(&binaries, &plan, &parent, &cancel, &tx) {
+        this.follow(rx, cx);
+        this.spawn_job(cx, move || match export::export_album(&binaries, &plan, &parent, &cancel, &tx) {
             Ok(reports) => JobMsg::Exported { note, reports },
             Err(error) => JobMsg::Done { operation: "导出专辑", result: Err(error.to_string()) },
         });
+        });
     }
 
-    fn concat_sources(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn concat_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         if self.busy {
             return;
@@ -1506,17 +1511,17 @@ impl Studio {
                 }
             }
         }
-        let Some(output) = rfd::FileDialog::new().set_title("保存合并后的 FLAC").set_file_name("joined.flac").save_file() else {
-            return;
-        };
-        self.cancel.reset();
-        let cancel = self.cancel.clone();
-        self.spawn_job(cx, move || match export::concatenate(&binaries, &paths, &output, &cancel) {
-            Ok(info) => JobMsg::Done {
-                operation: "合并录音",
-                result: Ok(format!("已写出 {}, {} Hz.", output.display(), info.rate)),
-            },
-            Err(error) => JobMsg::Done { operation: "合并录音", result: Err(error.to_string()) },
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("保存合并后的 FLAC").set_file_name("joined.flac").save_file(), move |this, output, _, cx| {
+            let Some(output) = output else { return };
+            this.cancel.reset();
+            let cancel = this.cancel.clone();
+            this.spawn_job(cx, move || match export::concatenate(&binaries, &paths, &output, &cancel) {
+                Ok(info) => JobMsg::Done {
+                    operation: "合并录音",
+                    result: Ok(format!("已写出 {}, {} Hz.", output.display(), info.rate)),
+                },
+                Err(error) => JobMsg::Done { operation: "合并录音", result: Err(error.to_string()) },
+            });
         });
     }
 
@@ -1986,9 +1991,14 @@ impl Studio {
 
     fn import_program(&mut self, session_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(files) = rfd::FileDialog::new().set_title(if session_only { "识别场次信息" } else { "导入节目单" }).add_filter("图片或文本", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "txt", "md"]).pick_files() else {
-            return;
-        };
+        let title: &'static str = if session_only { "识别场次信息" } else { "导入节目单" };
+        super::defer_dialog(window, cx, move || rfd::FileDialog::new().set_title(title).add_filter("图片或文本", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "txt", "md"]).pick_files(), move |this, files, window, cx| {
+            let Some(files) = files else { return };
+            this.import_chosen_program(session_only, files, window, cx);
+        });
+    }
+
+    fn import_chosen_program(&mut self, session_only: bool, files: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let text = files.iter().filter(|path| text_file(path)).cloned().collect::<Vec<_>>();
         let images = files.iter().filter(|path| !text_file(path)).cloned().collect::<Vec<_>>();
         if !text.is_empty() && !images.is_empty() || text.len() > 1 {
@@ -2416,17 +2426,17 @@ impl Studio {
     }
 
     fn pick_cd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(files) = rfd::FileDialog::new().set_title("选择音频和 CUE").add_filter("音频或 CUE", CD_EXT).pick_files() else {
-            return;
-        };
-        self.add_cd_paths(files, window, cx);
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择音频和 CUE").add_filter("音频或 CUE", CD_EXT).pick_files(), |this, files, window, cx| {
+            let Some(files) = files else { return };
+            this.add_cd_paths(files, window, cx);
+        });
     }
 
     fn pick_cd_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(folder) = rfd::FileDialog::new().set_title("选择 CD 文件夹").pick_folder() else {
-            return;
-        };
-        self.add_cd_paths(vec![folder], window, cx);
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择 CD 文件夹").pick_folder(), |this, folder, window, cx| {
+            let Some(folder) = folder else { return };
+            this.add_cd_paths(vec![folder], window, cx);
+        });
     }
 
     fn add_cd_paths(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -2679,11 +2689,11 @@ impl Studio {
             self.show_error("请先选择一张碟.", cx);
             return;
         };
-        let Some(file) = rfd::FileDialog::new().set_title("选择 CUE").add_filter("CUE", &["cue"]).pick_file() else {
-            return;
-        };
+        let index = index;
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择 CUE").add_filter("CUE", &["cue"]).pick_file(), move |this, file, window, cx| {
+        let Some(file) = file else { return };
         let mut files = Vec::new();
-        for disc in &self.cd_discs {
+        for disc in &this.cd_discs {
             for item in &disc.files {
                 if !files.iter().any(|(_, path)| path == &item.1) {
                     files.push(item.clone());
@@ -2693,7 +2703,7 @@ impl Studio {
         let prefer = file.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
         match cue::parse_disc_cue_near(&file, &files, &prefer) {
             Ok((album, rows)) => {
-                if let Some(disc) = self.cd_discs.get_mut(index) {
+                if let Some(disc) = this.cd_discs.get_mut(index) {
                     disc.cue_path = file.display().to_string();
                     disc.album = album;
                     disc.rows = rows;
@@ -2701,14 +2711,15 @@ impl Studio {
                 }
             }
             Err(error) => {
-                if let Some(disc) = self.cd_discs.get_mut(index) {
+                if let Some(disc) = this.cd_discs.get_mut(index) {
                     disc.cue_path = file.display().to_string();
                     disc.issue = error.to_string();
                 }
             }
         }
-        self.fill_suite(window, cx);
-        self.load_disc(window, cx);
+        this.fill_suite(window, cx);
+        this.load_disc(window, cx);
+        });
     }
 
     fn add_disc_audio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2718,10 +2729,10 @@ impl Studio {
             self.show_error("请先选择一张碟.", cx);
             return;
         };
-        let Some(files) = rfd::FileDialog::new().set_title("选择音频").add_filter("音频", AUDIO_EXT).pick_files() else {
-            return;
-        };
-        if let Some(disc) = self.cd_discs.get_mut(index) {
+        let index = index;
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择音频").add_filter("音频", AUDIO_EXT).pick_files(), move |this, files, window, cx| {
+        let Some(files) = files else { return };
+        if let Some(disc) = this.cd_discs.get_mut(index) {
             for file in files {
                 let Some(name) = file.file_name().map(|item| item.to_string_lossy().to_string()) else {
                     continue;
@@ -2731,27 +2742,28 @@ impl Studio {
                 }
             }
         }
-        let cue_path = self.cd_discs.get(index).map(|disc| disc.cue_path.clone()).unwrap_or_default();
-        let audio = self.cd_discs.get(index).map(|disc| disc.files.clone()).unwrap_or_default();
+        let cue_path = this.cd_discs.get(index).map(|disc| disc.cue_path.clone()).unwrap_or_default();
+        let audio = this.cd_discs.get(index).map(|disc| disc.files.clone()).unwrap_or_default();
         if !cue_path.is_empty() {
             match cue::parse_disc_cue(std::path::Path::new(&cue_path), &audio) {
                 Ok((album, rows)) => {
-                    if let Some(disc) = self.cd_discs.get_mut(index) {
+                    if let Some(disc) = this.cd_discs.get_mut(index) {
                         disc.album = album;
                         disc.rows = rows;
                         disc.issue.clear();
                     }
                 }
                 Err(error) => {
-                    if let Some(disc) = self.cd_discs.get_mut(index) {
+                    if let Some(disc) = this.cd_discs.get_mut(index) {
                         disc.issue = error.to_string();
                     }
                 }
             }
-        } else if let Some(disc) = self.cd_discs.get_mut(index) {
+        } else if let Some(disc) = this.cd_discs.get_mut(index) {
             disc.issue = "未配对 CUE.".into();
         }
-        self.load_disc(window, cx);
+        this.load_disc(window, cx);
+        });
     }
 
     fn ensure_project(&mut self) {
@@ -2775,80 +2787,16 @@ impl Studio {
         let album_composer = text(&self.cd_composer, cx);
         let album_date = text(&self.cd_date, cx);
         let discs = self.cd_discs.clone();
-        let Some(project) = self.project_mut() else {
+        let placement = match mode {
+            CdImport::Replace => cue::CdPlacement::Replace,
+            CdImport::NextDisc => cue::CdPlacement::NextDisc,
+            CdImport::Append => cue::CdPlacement::Append,
+        };
+        let Some(outcome) = self.project_mut().map(|project| cue::import_discs(project, &discs, placement, &album_title, &album_artist, &album_composer, &album_date)) else {
             return;
         };
-        if project.name.trim().is_empty() {
-            project.name = album_title;
-        }
-        if project.performer.trim().is_empty() {
-            project.performer = album_artist.clone();
-        }
-        if project.composer.trim().is_empty() {
-            project.composer = album_composer.clone();
-        }
-        if project.date.trim().is_empty() {
-            project.date = album_date.clone();
-        }
-        let shift = match mode {
-            CdImport::Replace => {
-                project.tracks.clear();
-                project.sources.clear();
-                project.source_paths.clear();
-                0
-            }
-            CdImport::NextDisc => project.tracks.iter().map(|track| track.disc).max().unwrap_or(0),
-            CdImport::Append => {
-                let blank = project.tracks.len() == 1 && project.tracks[0].source.is_empty() && project.tracks[0].tags.title.trim().is_empty() && project.tracks[0].parts.is_empty();
-                if blank {
-                    project.tracks.clear();
-                }
-                0
-            }
-        };
-        let mut imported = 0usize;
-        let mut skipped = Vec::new();
-        for disc in discs {
-            if disc.rows.is_empty() {
-                skipped.push(format!("碟 {:02}", disc.number));
-                continue;
-            }
-            let number = disc.number.saturating_add(shift);
-            for row in disc.rows {
-                let source = if row.source.is_empty() { String::new() } else { names::source_id(number, &row.source) };
-                if !source.is_empty() && !project.sources.iter().any(|item| item == &source) {
-                    project.sources.push(source.clone());
-                }
-                if !source.is_empty() && !row.path.is_empty() {
-                    project.source_paths.insert(source.clone(), row.path.clone());
-                }
-                let mut track = Track::blank();
-                track.source = source;
-                track.disc = number;
-                track.start = if row.start.is_empty() { "00:00".into() } else { row.start };
-                track.end = row.end;
-                track.filename = row.filename;
-                track.tags.title = row.title;
-                track.tags.artist = if row.artist.is_empty() { album_artist.clone() } else { row.artist };
-                track.tags.composer = if row.composer.is_empty() { album_composer.clone() } else { row.composer };
-                track.tags.album = project.name.clone();
-                track.tags.date = album_date.clone();
-                if number > 0 {
-                    track.tags.track = format!("{:02}", row.number);
-                    track.tags.disc = format!("{:02}", number);
-                }
-                project.tracks.push(track);
-                imported += 1;
-            }
-        }
-        if project.tracks.is_empty() {
-            project.tracks.push(Track::blank());
-        }
-        let max_disc = project.tracks.iter().map(|track| track.disc).max().unwrap_or(0);
-        project.disc_count = if matches!(mode, CdImport::Replace) { max_disc } else { project.disc_count.max(max_disc) };
-        if project.disc_count > 1 && (project.naming_rule.trim().is_empty() || project.naming_rule.trim() == names::DEFAULT_NAMING) {
-            project.naming_rule = "{Disc}-{Track} - {Title}".into();
-        }
+        let imported = outcome.imported;
+        let skipped = outcome.skipped;
         self.track_index = Some(0);
         self.track_picks.clear();
         self.page = super::Page::Split;
@@ -2862,23 +2810,23 @@ impl Studio {
         self.mark_dirty(cx);
     }
 
-    fn pick_video_audio(&mut self, cx: &mut Context<Self>) {
-        let Some(files) = rfd::FileDialog::new().set_title("选择音轨").add_filter("音频", AUDIO_EXT).pick_files() else {
-            return;
-        };
-        self.video_files = files;
-        cx.notify();
+    fn pick_video_audio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择音轨").add_filter("音频", AUDIO_EXT).pick_files(), |this, files, _, cx| {
+            let Some(files) = files else { return };
+            this.video_files = files;
+            cx.notify();
+        });
     }
 
-    fn pick_video_cover(&mut self, cx: &mut Context<Self>) {
-        let Some(file) = rfd::FileDialog::new().set_title("选择封面").add_filter("图片", &["png", "jpg", "jpeg"]).pick_file() else {
-            return;
-        };
-        self.video_cover = file.display().to_string().into();
-        cx.notify();
+    fn pick_video_cover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择封面").add_filter("图片", &["png", "jpg", "jpeg"]).pick_file(), |this, file, _, cx| {
+            let Some(file) = file else { return };
+            this.video_cover = file.display().to_string().into();
+            cx.notify();
+        });
     }
 
-    fn make_videos(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn make_videos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -2890,17 +2838,16 @@ impl Studio {
             self.show_error("请选择音轨和封面.", cx);
             return;
         }
-        let Some(folder) = rfd::FileDialog::new().set_title("选择视频输出位置").pick_folder() else {
-            return;
-        };
         let sources = self.video_files.clone();
         let cover = std::path::PathBuf::from(self.video_cover.to_string());
         let mode = self.video_mode;
-        self.cancel.reset();
-        let cancel = self.cancel.clone();
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择视频输出位置").pick_folder(), move |this, folder, _, cx| {
+        let Some(folder) = folder else { return };
+        this.cancel.reset();
+        let cancel = this.cancel.clone();
         let (tx, rx) = async_channel::unbounded();
-        self.follow(rx, cx);
-        self.spawn_job(cx, move || match video::make_cover_videos(&binaries, &sources, &cover, &folder, mode, &cancel, &tx) {
+        this.follow(rx, cx);
+        this.spawn_job(cx, move || match video::make_cover_videos(&binaries, &sources, &cover, &folder, mode, &cancel, &tx) {
             Ok(results) => {
                 let ok = results.iter().filter(|(_, item)| item.is_ok()).count();
                 let mut lines = vec![format!("封面视频完成 {ok} 条, 失败 {} 条.", results.len() - ok)];
@@ -2910,6 +2857,7 @@ impl Studio {
                 JobMsg::Done { operation: "封面视频", result: Ok(lines.join("\n")) }
             }
             Err(error) => JobMsg::Done { operation: "封面视频", result: Err(error.to_string()) },
+        });
         });
     }
 
@@ -3204,7 +3152,7 @@ impl Studio {
                                     .flex()
                                     .flex_row()
                                     .gap(px(8.))
-                                    .child(plain_btn(Button::new("cover-photo").label("选择场照").on_click(cx.listener(|this, _, _, cx| this.pick_cover_photo(cx)))))
+                                    .child(plain_btn(Button::new("cover-photo").label("选择场照").on_click(cx.listener(|this, _, window, cx| this.pick_cover_photo(window, cx)))))
                                     .child(plain_btn(Button::new("cover-design").label("发送场次信息并设计封面").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.design_cover(cx)))))
                                     .child(quiet_btn(Button::new("cover-undo").label("撤销 AI 方案").disabled(self.cover_undo.is_none()).on_click(cx.listener(|this, _, window, cx| this.undo_cover(window, cx)))))
                                     .child(quiet_btn(Button::new("cover-read").label("识别场照文字").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_photo(cx))))),
@@ -3268,7 +3216,7 @@ impl Studio {
                                     .flex_row()
                                     .gap(px(8.))
                                     .child(plain_btn(Button::new("cover-refresh").label("更新预览").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.refresh_cover(cx)))))
-                                    .child(plain_btn(Button::new("cover-download").label("下载 PNG").disabled(self.cover_preview.is_empty()).on_click(cx.listener(|this, _, _, cx| this.save_cover_png(cx)))))
+                                    .child(plain_btn(Button::new("cover-download").label("下载 PNG").disabled(self.cover_preview.is_empty()).on_click(cx.listener(|this, _, window, cx| this.save_cover_png(window, cx)))))
                                     .child(primary_btn(Button::new("cover-apply").label("用作专辑封面").disabled(self.cover_preview.is_empty()).on_click(cx.listener(|this, _, _, cx| this.use_rendered_cover(cx))))),
                             ),
                     ),
@@ -3508,19 +3456,21 @@ impl Studio {
         });
     }
 
-    fn download_cover(&mut self, cx: &mut Context<Self>) {
+    fn download_cover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.project().map(|item| item.cover_path.clone()).unwrap_or_default();
         if path.trim().is_empty() {
             self.show_error("还没有封面.", cx);
             return;
         }
         let name = self.project().map(|item| item.cover_file.clone()).unwrap_or_else(|| "cover.png".into());
-        let Some(dest) = rfd::FileDialog::new().set_title("下载当前封面").set_file_name(&name).save_file() else { return };
-        match std::fs::copy(&path, &dest) {
-            Ok(_) => self.status = format!("已保存 {}", dest.display()).into(),
-            Err(error) => self.show_error(error.to_string(), cx),
-        }
-        cx.notify();
+        super::defer_dialog(window, cx, move || rfd::FileDialog::new().set_title("下载当前封面").set_file_name(&name).save_file(), move |this, dest, _, cx| {
+            let Some(dest) = dest else { return };
+            match std::fs::copy(&path, &dest) {
+                Ok(_) => this.status = format!("已保存 {}", dest.display()).into(),
+                Err(error) => this.show_error(error.to_string(), cx),
+            }
+            cx.notify();
+        });
     }
 
     fn open_cover_studio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3539,12 +3489,14 @@ impl Studio {
         cx.notify();
     }
 
-    fn pick_cover_photo(&mut self, cx: &mut Context<Self>) {
-        let Some(file) = rfd::FileDialog::new().set_title("选择场照").add_filter("图片", &["png", "jpg", "jpeg", "webp", "heic", "heif"]).pick_file() else { return };
+    fn pick_cover_photo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let binaries = self.ffmpeg.clone();
-        self.spawn_job(cx, move || match crate::coverart::prepare(&file, binaries.as_ref()) {
-            Ok((path, _)) => JobMsg::CoverPhoto(path.display().to_string()),
-            Err(error) => JobMsg::Done { operation: "读取场照", result: Err(error.to_string()) },
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择场照").add_filter("图片", &["png", "jpg", "jpeg", "webp", "heic", "heif"]).pick_file(), move |this, file, _, cx| {
+            let Some(file) = file else { return };
+            this.spawn_job(cx, move || match crate::coverart::prepare(&file, binaries.as_ref()) {
+                Ok((path, _)) => JobMsg::CoverPhoto(path.display().to_string()),
+                Err(error) => JobMsg::Done { operation: "读取场照", result: Err(error.to_string()) },
+            });
         });
     }
 
@@ -3627,17 +3579,20 @@ impl Studio {
         self.recognize_intake(cx);
     }
 
-    fn save_cover_png(&mut self, cx: &mut Context<Self>) {
+    fn save_cover_png(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.cover_preview.trim().is_empty() {
             self.show_error("请先更新预览.", cx);
             return;
         }
-        let Some(dest) = rfd::FileDialog::new().set_title("下载 PNG").set_file_name("cover.png").save_file() else { return };
-        match std::fs::copy(&self.cover_preview, &dest) {
-            Ok(_) => self.status = format!("已保存 {}", dest.display()).into(),
-            Err(error) => self.show_error(error.to_string(), cx),
-        }
-        cx.notify();
+        let preview = self.cover_preview.clone();
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("下载 PNG").set_file_name("cover.png").save_file(), move |this, dest, _, cx| {
+            let Some(dest) = dest else { return };
+            match std::fs::copy(&preview, &dest) {
+                Ok(_) => this.status = format!("已保存 {}", dest.display()).into(),
+                Err(error) => this.show_error(error.to_string(), cx),
+            }
+            cx.notify();
+        });
     }
 
     fn use_rendered_cover(&mut self, cx: &mut Context<Self>) {
@@ -3741,38 +3696,41 @@ impl Studio {
         cx.notify();
     }
 
-    fn download_script(&mut self, cx: &mut Context<Self>) {
+    fn download_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(script) = self.script_now() else {
             self.show_error("还不能生成脚本. 请先补齐场次和曲目.", cx);
             return;
         };
-        let Some(path) = rfd::FileDialog::new().set_title("下载 .ps1").set_file_name("split.ps1").save_file() else { return };
-        match std::fs::write(&path, script.replace('\n', "\r\n")) {
-            Ok(()) => self.status = format!("已保存 {}", path.display()).into(),
-            Err(error) => self.show_error(error.to_string(), cx),
-        }
-        cx.notify();
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("下载 .ps1").set_file_name("split.ps1").save_file(), move |this, path, _, cx| {
+            let Some(path) = path else { return };
+            match std::fs::write(&path, script.replace('\n', "\r\n")) {
+                Ok(()) => this.status = format!("已保存 {}", path.display()).into(),
+                Err(error) => this.show_error(error.to_string(), cx),
+            }
+            cx.notify();
+        });
     }
 
-    fn import_processing_log(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = rfd::FileDialog::new().set_title("导入处理记录").add_filter("JSONL", &["jsonl", "txt"]).pick_file() else { return };
+    fn import_processing_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("导入处理记录").add_filter("JSONL", &["jsonl", "txt"]).pick_file(), |this, path, _, cx| {
+        let Some(path) = path else { return };
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                self.show_error(error.to_string(), cx);
+                this.show_error(error.to_string(), cx);
                 return;
             }
         };
         let text = String::from_utf8_lossy(&bytes);
         let rows = export::parse_processing_log(&text);
         if rows.is_empty() {
-            self.show_error("没有读到 processing 记录.", cx);
+            this.show_error("没有读到 processing 记录.", cx);
             return;
         }
-        let project_id = self.project().map(|item| item.id.clone()).unwrap_or_default();
-        let project_name = self.project().map(|item| item.name.clone()).unwrap_or_default();
+        let project_id = this.project().map(|item| item.id.clone()).unwrap_or_default();
+        let project_name = this.project().map(|item| item.name.clone()).unwrap_or_default();
         for row in &rows {
-            self.workspace.logs.push(crate::model::LogEntry {
+            this.workspace.logs.push(crate::model::LogEntry {
                 id: crate::model::new_id(),
                 project_id: if row.project_id.is_empty() { project_id.clone() } else { row.project_id.clone() },
                 project_name: project_name.clone(),
@@ -3782,8 +3740,9 @@ impl Studio {
                 message: if row.message.is_empty() { row.source.clone() } else { row.message.clone() },
             });
         }
-        self.status = format!("已导入 {} 条处理记录.", rows.len()).into();
-        self.mark_dirty(cx);
+        this.status = format!("已导入 {} 条处理记录.", rows.len()).into();
+        this.mark_dirty(cx);
+        });
     }
 
     fn apply_english(&mut self, window: &mut Window, cx: &mut Context<Self>) {

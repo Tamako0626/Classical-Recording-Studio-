@@ -949,7 +949,7 @@ impl Studio {
         self.mb_query.read(cx).focus_handle(cx).is_focused(window)
     }
 
-    fn export_backup(&mut self, cx: &mut Context<Self>) {
+    fn export_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         let text = match store::export_backup(&self.workspace) {
             Ok(text) => text,
@@ -958,46 +958,46 @@ impl Studio {
                 return;
             }
         };
-        let Some(path) = rfd::FileDialog::new().set_title(chrome::label::EXPORT_BACKUP).set_file_name("classical-recording-studio.json").save_file() else {
-            return;
-        };
-        if let Err(error) = std::fs::write(&path, text) {
-            self.show_error(error.to_string(), cx);
-            return;
-        }
-        self.status = format!("已导出备份 {}", path.display()).into();
-        cx.notify();
+        defer_dialog(window, cx, || rfd::FileDialog::new().set_title(chrome::label::EXPORT_BACKUP).set_file_name("classical-recording-studio.json").save_file(), move |this, path, _, cx| {
+            let Some(path) = path else { return };
+            if let Err(error) = std::fs::write(&path, text) {
+                this.show_error(error.to_string(), cx);
+                return;
+            }
+            this.status = format!("已导出备份 {}", path.display()).into();
+            cx.notify();
+        });
     }
 
     fn import_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = rfd::FileDialog::new().set_title(chrome::label::IMPORT_BACKUP).add_filter("JSON", &["json"]).pick_file() else {
-            return;
-        };
+        defer_dialog(window, cx, || rfd::FileDialog::new().set_title(chrome::label::IMPORT_BACKUP).add_filter("JSON", &["json"]).pick_file(), |this, path, window, cx| {
+        let Some(path) = path else { return };
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) => {
-                self.show_error(error.to_string(), cx);
+                this.show_error(error.to_string(), cx);
                 return;
             }
         };
         let workspace = match store::import_backup(&text) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.show_error(error.to_string(), cx);
+                this.show_error(error.to_string(), cx);
                 return;
             }
         };
-        self.workspace = workspace;
-        self.project_index = if self.workspace.projects.is_empty() { None } else { Some(0) };
-        self.track_index = self.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
-        self.track_picks.clear();
-        self.overlay = None;
-        self.page = Page::Projects;
-        self.detail = false;
-        self.project_group = "all";
-        self.push(window, cx);
-        self.status = "已导入备份.".into();
-        self.mark_dirty(cx);
+        this.workspace = workspace;
+        this.project_index = if this.workspace.projects.is_empty() { None } else { Some(0) };
+        this.track_index = this.project().and_then(|project| if project.tracks.is_empty() { None } else { Some(0) });
+        this.track_picks.clear();
+        this.overlay = None;
+        this.page = Page::Projects;
+        this.detail = false;
+        this.project_group = "all";
+        this.push(window, cx);
+        this.status = "已导入备份.".into();
+        this.mark_dirty(cx);
+        });
     }
 
     fn nav_button(&self, id: &'static str, mark: &'static str, label: &'static str, page: Page, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -1632,49 +1632,50 @@ impl Studio {
 
     fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(path) = rfd::FileDialog::new().set_title("打开项目文件").add_filter("项目", &["json"]).pick_file() else {
-            return;
-        };
+        defer_dialog(window, cx, || rfd::FileDialog::new().set_title("打开项目文件").add_filter("项目", &["json"]).pick_file(), |this, path, window, cx| {
+        let Some(path) = path else { return };
         let file = match store::read_project_file(&path) {
             Ok(file) => file,
             Err(error) => {
-                self.show_error(error.to_string(), cx);
+                this.show_error(error.to_string(), cx);
                 return;
             }
         };
         let source_id = file.project.id.clone();
-        match crate::model::import_project(&mut self.workspace, file) {
+        match crate::model::import_project(&mut this.workspace, file) {
             crate::model::ProjectImport::Existing => {
-                let index = self.workspace.projects.iter().position(|project| project.id == source_id).unwrap_or(0);
-                self.open_detail(index, window, cx);
-                self.status = "已打开现有项目.".into();
+                let index = this.workspace.projects.iter().position(|project| project.id == source_id).unwrap_or(0);
+                this.open_detail(index, window, cx);
+                this.status = "已打开现有项目.".into();
                 return;
             }
-            crate::model::ProjectImport::Copy => self.status = "已作为副本打开项目文件.".into(),
-            crate::model::ProjectImport::New => self.status = "已打开项目文件.".into(),
+            crate::model::ProjectImport::Copy => this.status = "已作为副本打开项目文件.".into(),
+            crate::model::ProjectImport::New => this.status = "已打开项目文件.".into(),
         }
-        let index = self.workspace.projects.len() - 1;
-        self.open_detail(index, window, cx);
-        self.mark_dirty(cx);
+        let index = this.workspace.projects.len() - 1;
+        this.open_detail(index, window, cx);
+        this.mark_dirty(cx);
+        });
     }
 
-    fn save_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
         let Some(project) = self.project().cloned() else {
             self.show_error("请先建立项目.", cx);
             return;
         };
         let leaf = crate::names::sanitize_leaf(&format!("CR Studio - {}", if project.name.trim().is_empty() { "recording-project" } else { project.name.trim() }), 110);
-        let Some(path) = rfd::FileDialog::new().set_title("保存项目文件").set_file_name(format!("{leaf}.crstudio.json")).save_file() else {
-            return;
-        };
-        let file = crate::model::ProjectFile::from_project(&project, &self.workspace.logs);
-        if let Err(error) = store::write_project_file(&path, &file) {
-            self.show_error(error.to_string(), cx);
-            return;
-        }
-        self.status = format!("已保存 {}", path.display()).into();
-        cx.notify();
+        let logs = self.workspace.logs.clone();
+        defer_dialog(window, cx, move || rfd::FileDialog::new().set_title("保存项目文件").set_file_name(format!("{leaf}.crstudio.json")).save_file(), move |this, path, _, cx| {
+            let Some(path) = path else { return };
+            let file = crate::model::ProjectFile::from_project(&project, &logs);
+            if let Err(error) = store::write_project_file(&path, &file) {
+                this.show_error(error.to_string(), cx);
+                return;
+            }
+            this.status = format!("已保存 {}", path.display()).into();
+            cx.notify();
+        });
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1695,7 +1696,7 @@ impl Studio {
                 this.overlay = Some(Overlay::Llm);
                 cx.notify();
             })))
-            .child(Button::new("tool-backup").xsmall().ghost().label(chrome::label::EXPORT_BACKUP).on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))))
+            .child(Button::new("tool-backup").xsmall().ghost().label(chrome::label::EXPORT_BACKUP).on_click(cx.listener(|this, _, window, cx| this.export_backup(window, cx))))
             .child(Button::new("tool-restore").xsmall().ghost().label(chrome::label::IMPORT_BACKUP).on_click(cx.listener(|this, _, window, cx| this.import_backup(window, cx))))
             .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(self.status.clone()));
         div()
@@ -1906,7 +1907,7 @@ impl Render for Studio {
                                     .absolute()
                                     .top(px(0.))
                                     .left(px(0.))
-                                    .right(px(0.))
+                                    .right(px(18.))
                                     .bottom(px(0.))
                                     .overflow_y_scroll()
                                     .track_scroll(&self.page_scroll)
@@ -1914,41 +1915,39 @@ impl Render for Studio {
                                     .py(px(24.))
                                     .child(div().w_full().max_w(px(1540.)).child(page)),
                             )
-                            .child(vertical_scrollbar(self.page_scroll.clone(), self.page_scroll_grab.clone(), cx.entity())),
+                            .child(vertical_scrollbar(self.page_scroll.clone(), self.page_scroll_grab.clone())),
                     )
                     .child(footer),
             )
     }
 }
 
-fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<f32>>>, entity: Entity<Studio>) -> impl IntoElement {
-    use gpui_kit::base::ScrollbarHandle;
+fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<f32>>>) -> impl IntoElement {
     use gpui_kit::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, canvas, fill};
     let scroll_move = scroll.clone();
     let scroll_up = scroll.clone();
     let grab_move = grab.clone();
     let grab_up = grab.clone();
-    let entity_move = entity.clone();
-    let entity_up = entity.clone();
-    div().absolute().top(px(6.)).bottom(px(6.)).right(px(4.)).w(px(12.)).child(canvas(
+    div().absolute().top(px(6.)).bottom(px(6.)).right(px(4.)).w(px(12.)).bg(rgb(0xe7e1f2)).rounded(px(6.)).child(canvas(
         |_, _, _| (),
-        move |fallback, _, window, cx| {
-            let bounds = bar_track(&scroll, fallback);
-            let metrics = bar_metrics(&scroll, px_f(bounds.size.height));
-            window.paint_quad(fill(bounds, rgb(0xe7e1f2)));
-            if let Some(metrics) = metrics {
-                let thumb = thumb_bounds(bounds, metrics);
-                let color = if grab.get().is_some() { rgb(0x5a3da8) } else { rgb(0xb7a6de) };
-                window.paint_quad(fill(thumb_paint(bounds, thumb), color));
+        move |bounds, _, window, _| {
+            if let Some(metrics) = bar_metrics(&scroll, px_f(bounds.size.height)) {
+                if metrics.range > 1. {
+                    let thumb = thumb_bounds(bounds, metrics);
+                    let color = if grab.get().is_some() { rgb(0x5a3da8) } else { rgb(0xb7a6de) };
+                    window.paint_quad(fill(thumb_paint(bounds, thumb), color));
+                }
             }
             let scroll_down = scroll.clone();
             let grab_down = grab.clone();
-            let entity_down = entity.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if !phase.capture() || event.button != MouseButton::Left || !bounds.contains(&event.position) {
                     return;
                 }
                 let Some(metrics) = bar_metrics(&scroll_down, px_f(bounds.size.height)) else { return };
+                if metrics.range <= 1. {
+                    return;
+                }
                 cx.stop_propagation();
                 let thumb = thumb_bounds(bounds, metrics);
                 let mouse = px_f(event.position.y);
@@ -1956,40 +1955,42 @@ fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cel
                 grab_down.set(Some(grab_at));
                 scroll_down.start_drag();
                 apply_bar_drag(&scroll_down, bounds, metrics, grab_at, mouse);
-                let _ = entity_down.update(cx, |_, cx| cx.notify());
+                window.refresh();
             });
             let scroll_move = scroll_move.clone();
             let grab_move = grab_move.clone();
-            let entity_move = entity_move.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                 if !phase.capture() {
                     return;
                 }
                 if !event.dragging() {
                     if grab_move.take().is_some() {
                         scroll_move.end_drag();
-                        let _ = entity_move.update(cx, |_, cx| cx.notify());
+                        window.refresh();
                     }
                     return;
                 }
                 let Some(grab_at) = grab_move.get() else { return };
                 let Some(metrics) = bar_metrics(&scroll_move, px_f(bounds.size.height)) else { return };
+                if metrics.range <= 1. {
+                    return;
+                }
                 cx.stop_propagation();
                 apply_bar_drag(&scroll_move, bounds, metrics, grab_at, px_f(event.position.y));
-                let _ = entity_move.update(cx, |_, cx| cx.notify());
+                window.refresh();
             });
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                 if !phase.capture() || event.button != MouseButton::Left {
                     return;
                 }
                 if grab_up.take().is_some() {
                     cx.stop_propagation();
                     scroll_up.end_drag();
-                    let _ = entity_up.update(cx, |_, cx| cx.notify());
+                    window.refresh();
                 }
             });
         },
-    ))
+    ).size_full())
 }
 
 #[derive(Clone, Copy)]
@@ -1997,19 +1998,6 @@ struct BarMetrics {
     range: f32,
     thumb: f32,
     offset: f32,
-}
-
-fn bar_track(scroll: &gpui_kit::ScrollHandle, fallback: gpui_kit::Bounds<gpui_kit::Pixels>) -> gpui_kit::Bounds<gpui_kit::Pixels> {
-    use gpui_kit::base::ScrollbarHandle;
-    let viewport = scroll.viewport_bounds();
-    if viewport.size.height.as_f32() < 2. || viewport.size.width.as_f32() < 2. {
-        return fallback;
-    }
-    let width = px(12.);
-    gpui_kit::Bounds {
-        origin: gpui_kit::point(viewport.origin.x + viewport.size.width - width - px(4.), viewport.origin.y + px(6.)),
-        size: gpui_kit::size(width, (viewport.size.height - px(12.)).max(px(0.))),
-    }
 }
 
 fn bar_metrics(scroll: &gpui_kit::ScrollHandle, track: f32) -> Option<BarMetrics> {
@@ -2026,7 +2014,7 @@ fn thumb_bounds(track: gpui_kit::Bounds<gpui_kit::Pixels>, metrics: BarMetrics) 
     let track_h = px_f(track.size.height);
     let thumb = metrics.thumb.min(track_h);
     let travel = (track_h - thumb).max(0.);
-    let progress = (-metrics.offset / metrics.range).clamp(0., 1.);
+    let progress = thumb_progress(metrics.offset, metrics.range);
     gpui_kit::Bounds {
         origin: gpui_kit::point(track.origin.x, track.origin.y + px(travel * progress)),
         size: gpui_kit::size(track.size.width, px(thumb)),
@@ -2053,7 +2041,15 @@ fn apply_bar_drag(scroll: &gpui_kit::ScrollHandle, track: gpui_kit::Bounds<gpui_
 
 #[cfg(test)]
 mod scrollbar_tests {
-    use super::{clamp_scroll, offset_for_thumb_drag, scroll_extent, thumb_span};
+    use super::{clamp_scroll, offset_for_thumb_drag, run_dialog, scroll_extent, thumb_progress, thumb_span};
+
+    #[test]
+    fn a_short_page_does_not_produce_a_non_finite_thumb() {
+        assert_eq!(thumb_progress(0., 0.), 0.);
+        assert!(thumb_progress(0., 0.).is_finite());
+        assert_eq!(thumb_progress(-200., 400.), 0.5);
+        assert_eq!(thumb_progress(-900., 400.), 1.);
+    }
 
     #[test]
     fn positive_max_offset_still_leaves_a_thumb_range() {
@@ -2075,6 +2071,21 @@ mod scrollbar_tests {
         assert_eq!(clamp_scroll(-900., -400.), -400.);
         assert_eq!(clamp_scroll(30., -400.), 0.);
     }
+
+    #[test]
+    fn a_short_track_still_has_a_finite_thumb() {
+        let thumb = thumb_span(12., 400.);
+        assert!(thumb.is_finite());
+        assert!(thumb <= 12.);
+        assert!(thumb >= 1.);
+        assert!(offset_for_thumb_drag(f32::NAN, 10., 4., 0., 0., 0.).is_finite());
+    }
+
+    #[test]
+    fn a_file_dialog_returns_on_its_own_thread() {
+        assert_eq!(run_dialog(|| Some(7u8)), Some(7));
+        assert_eq!(run_dialog(|| None::<u8>), None);
+    }
 }
 
 fn px_f(value: gpui_kit::Pixels) -> f32 {
@@ -2082,23 +2093,59 @@ fn px_f(value: gpui_kit::Pixels) -> f32 {
 }
 
 fn scroll_extent(max_offset_y: f32) -> f32 {
-    max_offset_y.abs()
+    let extent = max_offset_y.abs();
+    if extent.is_finite() { extent } else { 0. }
+}
+
+fn thumb_progress(offset: f32, range: f32) -> f32 {
+    if !offset.is_finite() || !range.is_finite() || range <= 1. {
+        0.
+    } else {
+        (-offset / range).clamp(0., 1.)
+    }
 }
 
 fn thumb_span(view: f32, range: f32) -> f32 {
-    (view * view / (view + range)).clamp(28., view)
+    if !view.is_finite() || !range.is_finite() || view <= 1. {
+        return 1.;
+    }
+    let span = view * view / (view + range);
+    let floor = 28_f32.min(view);
+    if !span.is_finite() { floor } else { span.clamp(floor, view) }
 }
 
 fn offset_for_thumb_drag(view: f32, range: f32, thumb: f32, grab: f32, mouse_y: f32, track_y: f32) -> f32 {
+    if ![view, range, thumb, grab, mouse_y, track_y].iter().all(|value| value.is_finite()) {
+        return 0.;
+    }
     let travel = (view - thumb).max(1.);
     let ratio = ((mouse_y - grab - track_y) / travel).clamp(0., 1.);
-    -range * ratio
+    let offset = -range * ratio;
+    if offset.is_finite() { offset } else { 0. }
 }
 
 fn clamp_scroll(offset: f32, limit: f32) -> f32 {
     let low = limit.min(0.);
     let high = limit.max(0.);
     offset.clamp(low, high)
+}
+
+pub(super) fn defer_dialog<T: Send + 'static>(window: &mut Window, cx: &mut Context<Studio>, dialog: impl FnOnce() -> Option<T> + Send + 'static, apply: impl FnOnce(&mut Studio, Option<T>, &mut Window, &mut Context<Studio>) + Send + 'static) {
+    let view = cx.entity();
+    window
+        .spawn(cx, async move |cx| {
+            let value = cx.background_spawn(async move { run_dialog(dialog) }).await;
+            let _ = cx.update_window_entity(&view, |studio, window, cx| apply(studio, value, window, cx));
+        })
+        .detach();
+}
+
+fn run_dialog<T: Send + 'static>(dialog: impl FnOnce() -> Option<T> + Send + 'static) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(dialog());
+    });
+    rx.recv().unwrap_or(None)
 }
 
 pub fn run() {
