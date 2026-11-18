@@ -2013,11 +2013,13 @@ fn bar_track(scroll: &gpui_kit::ScrollHandle, fallback: gpui_kit::Bounds<gpui_ki
 }
 
 fn bar_metrics(scroll: &gpui_kit::ScrollHandle, track: f32) -> Option<BarMetrics> {
-    let range = -px_f(scroll.max_offset().y);
-    if track <= 1. || range <= 1. {
+    if track <= 1. {
         return None;
     }
-    Some(BarMetrics { range, thumb: thumb_span(track, range), offset: px_f(scroll.offset().y) })
+    // max_offset 是还能往下滚的距离, 为正. 当前 offset 往下滚时变负.
+    let range = scroll_extent(px_f(scroll.max_offset().y));
+    let thumb = if range <= 1. { track } else { thumb_span(track, range).min(track) };
+    Some(BarMetrics { range, thumb, offset: px_f(scroll.offset().y) })
 }
 
 fn thumb_bounds(track: gpui_kit::Bounds<gpui_kit::Pixels>, metrics: BarMetrics) -> gpui_kit::Bounds<gpui_kit::Pixels> {
@@ -2051,7 +2053,14 @@ fn apply_bar_drag(scroll: &gpui_kit::ScrollHandle, track: gpui_kit::Bounds<gpui_
 
 #[cfg(test)]
 mod scrollbar_tests {
-    use super::{clamp_scroll, offset_for_thumb_drag, thumb_span};
+    use super::{clamp_scroll, offset_for_thumb_drag, scroll_extent, thumb_span};
+
+    #[test]
+    fn positive_max_offset_still_leaves_a_thumb_range() {
+        assert_eq!(scroll_extent(400.), 400.);
+        assert_eq!(scroll_extent(-400.), 400.);
+        assert_eq!(scroll_extent(0.), 0.);
+    }
 
     #[test]
     fn dragging_past_the_bar_reaches_the_ends() {
@@ -2070,6 +2079,10 @@ mod scrollbar_tests {
 
 fn px_f(value: gpui_kit::Pixels) -> f32 {
     value.as_f32()
+}
+
+fn scroll_extent(max_offset_y: f32) -> f32 {
+    max_offset_y.abs()
 }
 
 fn thumb_span(view: f32, range: f32) -> f32 {
