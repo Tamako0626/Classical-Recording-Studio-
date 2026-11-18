@@ -68,7 +68,7 @@ pub fn normalize(fields: &[(&str, &str)]) -> SessionNormalize {
             "orchestra" => normalize_list(&input, |name| dict_get(ORCHESTRAS, name)),
             "origin" => dict_get(ORIGINS, &input).unwrap_or("").to_string(),
             "performer" | "conductor" => normalize_list(&input, |name| dict_get(PEOPLE, name)),
-            "composer" => normalize_list(&input, composer_name),
+            "composer" => normalize_list(&input, |name| composer_name(name)),
             _ => String::new(),
         };
         if !resolved.is_empty() && resolved != input {
@@ -119,9 +119,8 @@ fn session_title(value: &str, context: &dyn Fn(&str) -> String) -> String {
     if let Some(named) = dict_get(PEOPLE, &pre).or_else(|| dict_get(ORCHESTRAS, &pre)) {
         return [Some(subject.as_str()), Some(named), Some(*suffix_en)].into_iter().flatten().filter(|item| !item.is_empty()).collect::<Vec<_>>().join(" – ");
     }
-    let composer = composer_name(pre.trim_end_matches('的').trim());
-    if !composer.is_empty() {
-        let last = composer.split(' ').next_back().unwrap_or(&composer);
+    if let Some(composer) = composer_name(pre.trim_end_matches('的').trim()) {
+        let last = composer.split(' ').next_back().unwrap_or(composer);
         return if subject.is_empty() { format!("{last} {suffix_en}") } else { format!("{subject} – {last} {suffix_en}") };
     }
     if !has_han(&pre) && pre.chars().count() <= 170 && pre.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, ' ' | '.' | '·' | '\'' | '’' | '&' | '–' | '-')) {
@@ -150,8 +149,8 @@ fn normalize_list(value: &str, find: impl Fn(&str) -> Option<&str>) -> String {
     resolved.join(" / ")
 }
 
-fn composer_name(value: &str) -> String {
-    dict_get(COMPOSERS, value).unwrap_or("").to_string()
+fn composer_name(value: &str) -> Option<&str> {
+    dict_get(COMPOSERS, value)
 }
 
 struct Hall {

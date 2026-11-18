@@ -3325,8 +3325,9 @@ impl Studio {
 
     fn undo_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
+        let undo = self.session_undo.clone();
         if let Some(project) = self.project_mut() {
-            for (key, before, after) in &self.session_undo {
+            for (key, before, after) in &undo {
                 let current = read_session(project, key);
                 if current == *after {
                     write_session(project, key, before);
@@ -3391,7 +3392,7 @@ impl Studio {
         let Some(track) = project.tracks.get(index) else { return };
         let query = track.tags.title.clone();
         let mut choices = Vec::new();
-        let mut push = |title: String, composer: String, source: &str, choices: &mut Vec<super::FileCandidate>, project: &Project, track: &Track, index: usize| {
+        let push = |title: String, composer: String, source: &str, choices: &mut Vec<super::FileCandidate>, project: &Project, track: &Track, index: usize| {
             for (label, with_composer) in [(title.clone(), false), (if composer.is_empty() { String::new() } else { format!("{composer} - {title}") }, true)] {
                 if label.trim().is_empty() {
                     continue;
@@ -3429,9 +3430,10 @@ impl Studio {
         let Some(choice) = self.name_choices.get(index).cloned() else { return };
         self.pull(cx);
         let Some(track_index) = self.track_index else { return };
+        let update_tags = self.name_update_tags;
         if let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(track_index)) {
             track.filename = choice.stem;
-            if self.name_update_tags {
+            if update_tags {
                 track.tags.title = choice.title;
                 if !choice.composer.is_empty() {
                     track.tags.composer = choice.composer;
@@ -3643,9 +3645,10 @@ impl Studio {
             self.show_error("请先更新预览.", cx);
             return;
         }
+        let preview = self.cover_preview.clone();
         if let Some(project) = self.project_mut() {
             project.cover_file = "cover.png".into();
-            project.cover_path = self.cover_preview.clone();
+            project.cover_path = preview;
             project.cover_status = "已准备".into();
         }
         self.overlay = None;

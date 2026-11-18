@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
-use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+use image::{DynamicImage, Rgba, RgbaImage};
 use serde_json::Value;
 
 use crate::error::{StudioError, StudioResult};
@@ -155,9 +155,10 @@ pub fn render(photo: &DynamicImage, spec: &CoverSpec, size: u32) -> RgbaImage {
     let width = (size as f32 * 0.85) as i32;
     let x = if align_center { (size as i32 - width) / 2 } else { (size as f32 * 0.075) as i32 };
     let mut y = (size as f32 * if spec.layout == Layout::Photo { 1200.0 } else { 1255.0 } / 1600.0) as i32;
+    let gap = scale(size, 5) as i32;
     y = draw_block(&mut canvas, spec.title.trim(), x, y, width, scale(size, 77), ink, true, false, shadow, align_center);
-    y = draw_block(&mut canvas, spec.performer.trim(), x, y + scale(size, 5), width, scale(size, 42), ink, false, true, shadow, align_center);
-    let _ = draw_block(&mut canvas, spec.detail.trim(), x, y + scale(size, 5), width, scale(size, 28), ink, false, false, shadow, align_center);
+    y = draw_block(&mut canvas, spec.performer.trim(), x, y + gap, width, scale(size, 42), ink, false, true, shadow, align_center);
+    let _ = draw_block(&mut canvas, spec.detail.trim(), x, y + gap, width, scale(size, 28), ink, false, false, shadow, align_center);
     canvas
 }
 
@@ -269,7 +270,7 @@ mod tests {
     #[test]
     fn horizontal_crop_keeps_the_chosen_side() {
         let mut photo = RgbaImage::new(100, 20);
-        for (x, y, pixel) in photo.enumerate_pixels_mut() {
+        for (x, _y, pixel) in photo.enumerate_pixels_mut() {
             *pixel = if x < 50 { Rgba([220, 20, 20, 255]) } else { Rgba([20, 20, 220, 255]) };
         }
         let photo = DynamicImage::ImageRgba8(photo);
