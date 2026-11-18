@@ -2,7 +2,9 @@
 
 pub mod catalog;
 pub mod chrome;
+pub mod coverart;
 pub mod cue;
+pub mod english;
 pub mod effects;
 pub mod error;
 pub mod export;

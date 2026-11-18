@@ -46,17 +46,99 @@ const WORKS: &[Work] = &[
     Work { composer: "Sergei Rachmaninoff", title: "Piano Concerto No. 2 in C minor, Op. 18", aliases: &["拉二钢协", "拉赫二协"] },
     Work { composer: "Gustav Mahler", title: "Symphony No. 2 in C minor, Resurrection", aliases: &["马二", "复活交响曲"] },
     Work { composer: "Johannes Brahms", title: "Piano Concerto No. 2 in B-flat major, Op. 83", aliases: &["勃拉姆斯二协"] },
+    Work { composer: "Maurice Ravel", title: "Gaspard de la nuit", aliases: &["夜之加斯帕德", "加斯帕德"] },
+    Work { composer: "Robert Schumann", title: "Fantasiestücke, Op. 12", aliases: &["幻想曲集", "舒曼幻想曲集"] },
 ];
 
 pub fn suggest_work(text: &str) -> Option<Suggestion> {
+    search_works(text).into_iter().next()
+}
+
+pub fn search_works(text: &str) -> Vec<Suggestion> {
     let folded = text.trim().to_lowercase();
-    if folded.is_empty() {
+    if folded.chars().count() < 2 {
+        return Vec::new();
+    }
+    WORKS
+        .iter()
+        .filter(|work| {
+            let title = work.title.to_lowercase();
+            work.aliases.iter().any(|alias| folded.contains(&alias.to_lowercase())) || folded.contains(&title) || folded.chars().count() >= 6 && title.contains(&folded)
+        })
+        .map(|work| Suggestion { composer: work.composer, title: work.title })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MovementList {
+    pub composer: &'static str,
+    pub title: &'static str,
+    pub parts: &'static [&'static str],
+    pub main: usize,
+    pub numbered: bool,
+}
+
+const MOVEMENTS: &[MovementList] = &[
+    MovementList { composer: "Ludwig van Beethoven", title: "Symphony No. 3 in E-flat major, Op. 55, Eroica", parts: &["Allegro con brio", "Marcia funebre: Adagio assai", "Scherzo: Allegro vivace", "Finale: Allegro molto"], main: 4, numbered: false },
+    MovementList { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 6 in F major, Op. 10 No. 2", parts: &["Allegro", "Allegretto", "Presto"], main: 3, numbered: false },
+    MovementList { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 7 in D major, Op. 10 No. 3", parts: &["Presto", "Largo e mesto", "Menuetto: Allegro", "Rondo: Allegro"], main: 4, numbered: false },
+    MovementList { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 14 in C-sharp minor, Op. 27 No. 2, Moonlight", parts: &["Adagio sostenuto", "Allegretto", "Presto agitato"], main: 3, numbered: false },
+    MovementList { composer: "Ludwig van Beethoven", title: "Piano Sonata No. 30 in E major, Op. 109", parts: &["Vivace, ma non troppo – Adagio espressivo", "Prestissimo", "Gesangvoll, mit innigster Empfindung"], main: 3, numbered: false },
+    MovementList { composer: "Robert Schumann", title: "Fantasiestücke, Op. 12", parts: &["Des Abends", "Aufschwung", "Warum?", "Grillen", "In der Nacht", "Fabel", "Traumes Wirren", "Ende vom Lied"], main: 8, numbered: false },
+    MovementList { composer: "Robert Schumann", title: "Symphonic Etudes, Op. 13", parts: &["Theme: Andante", "Etude I (Variation 1)", "Etude II (Variation 2)", "Etude III: Vivace", "Etude IV (Variation 3)", "Etude V (Variation 4)", "Etude VI (Variation 5)", "Etude VII (Variation 6)", "Etude VIII (Variation 7)", "Etude IX: Presto possibile", "Etude X (Variation 8)", "Etude XI (Variation 9)", "Etude XII (Finale): Allegro brillante", "Posthumous Variation I", "Posthumous Variation II", "Posthumous Variation III", "Posthumous Variation IV", "Posthumous Variation V"], main: 13, numbered: true },
+    MovementList { composer: "Robert Schumann", title: "Kinderszenen, Op. 15", parts: &["Von fremden Ländern und Menschen", "Kuriose Geschichte", "Hasche-Mann", "Bittendes Kind", "Glückes genug", "Wichtige Begebenheit", "Träumerei", "Am Kamin", "Ritter vom Steckenpferd", "Fast zu ernst", "Fürchtenmachen", "Kind im Einschlummern", "Der Dichter spricht"], main: 13, numbered: false },
+    MovementList { composer: "Maurice Ravel", title: "Gaspard de la nuit", parts: &["Ondine", "Le Gibet", "Scarbo"], main: 3, numbered: false },
+    MovementList { composer: "Wolfgang Amadeus Mozart", title: "Piano Sonata No. 11 in A major, K. 331", parts: &["Andante grazioso (Theme and Variations)", "Menuetto and Trio", "Alla turca: Allegretto"], main: 3, numbered: false },
+    MovementList { composer: "Wolfgang Amadeus Mozart", title: "Piano Sonata No. 8 in A minor, K. 310", parts: &["Allegro maestoso", "Andante cantabile con espressione", "Presto"], main: 3, numbered: false },
+    MovementList { composer: "Wolfgang Amadeus Mozart", title: "Piano Sonata No. 14 in C minor, K. 457", parts: &["Molto allegro", "Adagio", "Allegro assai"], main: 3, numbered: false },
+    MovementList { composer: "Johann Sebastian Bach", title: "English Suite No. 2 in A minor, BWV 807", parts: &["Prelude", "Allemande", "Courante", "Sarabande", "Bourrée I and II", "Gigue"], main: 6, numbered: false },
+    MovementList { composer: "Frédéric Chopin", title: "Piano Concerto No. 2 in F minor, Op. 21", parts: &["Maestoso", "Larghetto", "Allegro vivace"], main: 3, numbered: false },
+    MovementList { composer: "Pyotr Ilyich Tchaikovsky", title: "Symphony No. 6 in B minor, Op. 74, Pathétique", parts: &["Adagio – Allegro non troppo", "Allegro con grazia", "Allegro molto vivace", "Adagio lamentoso"], main: 4, numbered: false },
+];
+
+const ROMAN: &[&str] = &["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII"];
+
+pub fn find_movements(title: &str, composer: &str) -> Option<&'static MovementList> {
+    let query = title.trim();
+    if query.chars().count() < 2 {
         return None;
     }
-    WORKS.iter().find(|work| work.aliases.iter().any(|alias| folded.contains(&alias.to_lowercase())) || folded.contains(&work.title.to_lowercase())).map(|work| Suggestion {
-        composer: work.composer,
-        title: work.title,
-    })
+    if let Some(hit) = suggest_work(query) {
+        if let Some(list) = MOVEMENTS.iter().find(|item| item.title == hit.title) {
+            if composer_fits(composer, list.composer) {
+                return Some(list);
+            }
+        }
+    }
+    let folded = query.to_lowercase();
+    MOVEMENTS.iter().find(|item| composer_fits(composer, item.composer) && (folded.contains(&item.title.to_lowercase()) || item.title.to_lowercase().contains(&folded) && query.chars().count() >= 8))
+}
+
+pub fn movement_title(list: &MovementList, index: usize) -> String {
+    let name = list.parts.get(index).copied().unwrap_or("");
+    if list.numbered {
+        format!("{} – {name}", list.title)
+    } else {
+        let mark = ROMAN.get(index).copied().unwrap_or("?");
+        format!("{} – {mark}. {name}", list.title)
+    }
+}
+
+fn composer_fits(hint: &str, known: &str) -> bool {
+    let hint = hint.trim();
+    if hint.is_empty() {
+        return true;
+    }
+    let lower = hint.to_lowercase();
+    let known = known.to_lowercase();
+    if lower.split_whitespace().any(|token| token.chars().count() >= 3 && known.contains(token)) || known.split_whitespace().any(|token| token.chars().count() >= 4 && lower.contains(token)) {
+        return true;
+    }
+    const NAMES: &[(&str, &str)] = &[("贝多芬", "beethoven"), ("莫扎特", "mozart"), ("肖邦", "chopin"), ("舒曼", "schumann"), ("舒伯特", "schubert"), ("德彪西", "debussy"), ("巴赫", "bach"), ("拉威尔", "ravel"), ("柴可夫斯基", "tchaikovsky")];
+    if let Some((_, english)) = NAMES.iter().find(|(name, _)| hint.contains(name)) {
+        return known.contains(english);
+    }
+    hint.chars().any(|ch| ('\u{3400}'..='\u{9fff}').contains(&ch))
 }
 
 #[cfg(test)]
@@ -70,5 +152,13 @@ mod tests {
         assert_eq!(hit.composer, "Ludwig van Beethoven");
         assert!(suggest_work("肖协2").unwrap().title.contains("Op. 21"));
         assert!(suggest_work("布七").unwrap().title.contains("WAB 107"));
+    }
+
+    #[test]
+    fn movement_lookup_lists_the_moonlight_sonata() {
+        let list = find_movements("月光奏鸣曲", "贝多芬").unwrap();
+        assert_eq!(list.parts.len(), 3);
+        assert!(movement_title(list, 0).contains("Adagio sostenuto"));
+        assert!(find_movements("月光奏鸣曲", "Mozart").is_none());
     }
 }

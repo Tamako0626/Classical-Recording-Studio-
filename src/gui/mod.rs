@@ -43,6 +43,15 @@ enum Overlay {
     Cd,
     Video,
     Llm,
+    Cover,
+}
+
+#[derive(Clone)]
+pub(super) struct FileCandidate {
+    pub title: String,
+    pub composer: String,
+    pub source: String,
+    pub stem: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,6 +89,12 @@ enum JobMsg {
     Names(Result<Vec<NameHit>, String>),
     Parts(Result<String, String>),
     Models(Result<Vec<String>, String>),
+    Exported { note: String, reports: Vec<crate::export::TrackReport> },
+    Compare { raw: std::path::PathBuf, wet: std::path::PathBuf, note: String },
+    CoverPreview(String),
+    CoverPhoto(String),
+    Artwork { back: bool, path: String, name: String },
+    CoverDesign(crate::coverart::CoverDesign),
 }
 
 pub struct Studio {
@@ -205,6 +220,30 @@ pub struct Studio {
     mb_hits: Vec<WorkHit>,
     preview_raw: Option<std::path::PathBuf>,
     preview_wet: Option<std::path::PathBuf>,
+    listen_source: String,
+    exports: Vec<crate::export::TrackReport>,
+    session_undo: Vec<(String, String, String)>,
+    session_note: String,
+    name_open: bool,
+    name_update_tags: bool,
+    name_choices: Vec<FileCandidate>,
+    movement_parts: Vec<String>,
+    movement_on: Vec<bool>,
+    fx_open: bool,
+    fx_track: Option<usize>,
+    fx_ending: bool,
+    fx_note: String,
+    cover_layout: u8,
+    cover_zoom: f32,
+    cover_x: f32,
+    cover_y: f32,
+    cover_photo: String,
+    cover_preview: String,
+    cover_undo: Option<(String, String, String, u8)>,
+    cover_pending: Option<crate::coverart::CoverDesign>,
+    cover_title: Entity<InputState>,
+    cover_performer: Entity<InputState>,
+    cover_detail: Entity<InputState>,
     save_task: Option<Task<()>>,
     job_task: Option<Task<()>>,
     progress_task: Option<Task<()>>,
@@ -272,6 +311,9 @@ impl Studio {
         let cd_row_file = input("文件名, 不含扩展名", cx);
         let mb_query = input("曲名, 作品号", cx);
         let movements = input("I. Allegro | II. Adagio | III. Rondo", cx);
+        let cover_title = input("专辑标题", cx);
+        let cover_performer = input("演出者", cx);
+        let cover_detail = input("音乐厅, 城市与日期", cx);
         let filter_query = input("项目、人物、曲目或文件名", cx);
         drop(input);
         let llm = store::load_llm();
@@ -329,6 +371,13 @@ impl Studio {
                 cx.notify();
             }
         }));
+        for field in [cover_title.clone(), cover_performer.clone(), cover_detail.clone()] {
+            subscriptions.push(cx.subscribe_in(&field, window, |_, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
         let workspace = store::load_workspace();
         let project_index = if workspace.projects.is_empty() { None } else { Some(0) };
         let track_index = project_index.and_then(|index| workspace.projects.get(index).and_then(|project| if project.tracks.is_empty() { None } else { Some(0) }));
@@ -461,6 +510,30 @@ impl Studio {
             mb_hits: Vec::new(),
             preview_raw: None,
             preview_wet: None,
+            listen_source: String::new(),
+            exports: Vec::new(),
+            session_undo: Vec::new(),
+            session_note: String::new(),
+            name_open: false,
+            name_update_tags: false,
+            name_choices: Vec::new(),
+            movement_parts: Vec::new(),
+            movement_on: Vec::new(),
+            fx_open: false,
+            fx_track: None,
+            fx_ending: false,
+            fx_note: String::new(),
+            cover_layout: 0,
+            cover_zoom: 1.0,
+            cover_x: 0.5,
+            cover_y: 0.5,
+            cover_photo: String::new(),
+            cover_preview: String::new(),
+            cover_undo: None,
+            cover_pending: None,
+            cover_title,
+            cover_performer,
+            cover_detail,
             save_task: None,
             job_task: None,
             progress_task: None,
@@ -716,6 +789,9 @@ impl Studio {
             JobMsg::English(Err(text)) => self.show_error(text, cx),
             JobMsg::Works(Ok(items)) => {
                 self.mb_hits = items;
+                if self.name_open {
+                    self.rebuild_name_choices();
+                }
                 self.status = format!("MusicBrainz 返回 {} 条.", self.mb_hits.len()).into();
             }
             JobMsg::Works(Err(text)) => self.show_error(text, cx),
@@ -738,13 +814,18 @@ impl Studio {
             JobMsg::Sessions(Err(text)) => self.show_error(text, cx),
             JobMsg::Names(Ok(items)) => {
                 self.name_hits = items;
-                self.status = if self.name_hits.is_empty() { "模型没有给出足够明确的曲名.".into() } else { "请选择一条模型曲名.".into() };
+                if self.name_open {
+                    self.rebuild_name_choices();
+                }
+                self.status = if self.name_hits.is_empty() { "模型没有给出足够明确的曲名.".into() } else { "请选择一条文件名. 勾选后可同时更新标签.".into() };
             }
             JobMsg::Names(Err(text)) => self.show_error(text, cx),
             JobMsg::Parts(Ok(text)) => {
+                self.movement_parts = crate::program::movement_titles(&text);
+                self.movement_on = vec![true; self.movement_parts.len()];
                 self.pending_parts = text;
                 self.movement_open = true;
-                self.status = "模型给出了乐章, 可填入当前曲目.".into();
+                self.status = "模型给出了乐章, 勾选后填入当前曲目.".into();
             }
             JobMsg::Parts(Err(text)) => self.show_error(text, cx),
             JobMsg::Models(Ok(names)) => {
@@ -768,6 +849,55 @@ impl Studio {
             JobMsg::Play(Err(text)) => {
                 self.playing = false;
                 self.show_error(text, cx);
+            }
+            JobMsg::Exported { note, reports } => {
+                let mut message = reports_message(&reports);
+                if !note.is_empty() {
+                    message = format!("{note}\n{message}");
+                }
+                self.exports = reports;
+                self.status = message.clone().into();
+                self.record("导出专辑", "成功", message, cx);
+            }
+            JobMsg::Compare { raw, wet, note } => {
+                self.preview_raw = Some(raw);
+                self.preview_wet = Some(wet);
+                self.fx_note = note;
+                self.fx_open = true;
+                self.status = self.fx_note.clone().into();
+            }
+            JobMsg::CoverPreview(path) => {
+                self.cover_preview = path;
+                self.status = "封面预览已更新. 1600 x 1600 PNG.".into();
+            }
+            JobMsg::CoverPhoto(path) => {
+                self.cover_photo = path;
+                self.status = "已读取场照. 可以调整裁剪后更新预览.".into();
+            }
+            JobMsg::Artwork { back, path, name } => {
+                if let Some(project) = self.project_mut() {
+                    if back {
+                        project.back_cover_file = name;
+                        project.back_cover_path = path;
+                    } else {
+                        project.cover_file = name;
+                        project.cover_path = path;
+                        project.cover_status = "已准备".into();
+                    }
+                }
+                self.status = "封面已准备.".into();
+                self.mark_dirty(cx);
+            }
+            JobMsg::CoverDesign(design) => {
+                let current = (text(&self.cover_title, cx), text(&self.cover_performer, cx), text(&self.cover_detail, cx), self.cover_layout);
+                self.cover_undo = Some(current);
+                self.cover_layout = match design.layout {
+                    crate::coverart::Layout::Ivory => 0,
+                    crate::coverart::Layout::Dark => 1,
+                    crate::coverart::Layout::Photo => 2,
+                };
+                self.cover_pending = Some(design);
+                self.status = "AI 方案已填入, 可继续编辑文字和排版.".into();
             }
         }
         cx.notify();
@@ -1593,11 +1723,13 @@ impl Studio {
             Overlay::Cd => chrome::label::CD,
             Overlay::Video => chrome::label::COVER_VIDEO,
             Overlay::Llm => chrome::label::LLM,
+            Overlay::Cover => "从场照制作专辑封面",
         };
         let body = match overlay {
             Overlay::Cd => self.cd_page(cx),
             Overlay::Video => self.video_page(cx),
             Overlay::Llm => self.llm_page(cx),
+            Overlay::Cover => self.cover_page(cx),
         };
         div()
             .flex()
@@ -1725,6 +1857,11 @@ impl Render for Studio {
             .into_any_element();
         let header = self.header(cx).into_any_element();
         let footer = self.footer(cx).into_any_element();
+        if let Some(design) = self.cover_pending.take() {
+            set_text(&self.cover_title, &design.title, window, cx);
+            set_text(&self.cover_performer, &design.performer, window, cx);
+            set_text(&self.cover_detail, &design.detail, window, cx);
+        }
         let overlay = self.overlay;
         let page = if let Some(overlay) = overlay {
             self.overlay_page(overlay, cx)

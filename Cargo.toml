@@ -1,6 +1,6 @@
 [package]
 name = "classical_recording_studio"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2021"
 license = "MIT"
 description = "古典录音工作台"
@@ -15,8 +15,11 @@ name = "ClassicalRecordingStudio"
 path = "src/main.rs"
 
 [dependencies]
+arboard = "3"
 async-channel = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+cosmic-text = "=0.12.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 encoding_rs = "0.8"
 gpui-kit = "0.10"
 rfd = "0.15"

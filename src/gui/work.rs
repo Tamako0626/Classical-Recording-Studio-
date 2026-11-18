@@ -10,7 +10,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, rgb,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, img, px, rgb,
 };
 use gpui_kit::component::input::InputState;
 
@@ -69,9 +69,11 @@ impl Studio {
                             .gap(px(8.))
                             .child(primary_btn(Button::new("read-session").label("识别场次信息").on_click(cx.listener(|this, _, window, cx| this.import_program(true, window, cx)))))
                             .child(plain_btn(Button::new("import-program").label("导入节目单").on_click(cx.listener(|this, _, window, cx| this.import_program(false, window, cx)))))
-                            .child(plain_btn(Button::new("english-session").label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))),
+                            .child(plain_btn(Button::new("english-session").label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, window, cx| this.english_local(window, cx)))))
+                            .child(quiet_btn(Button::new("english-model").label("用模型核对").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))),
                     ))
                     .child(session_form(self))
+                    .child(self.session_note(cx))
                     .child(self.model_strip(cx)),
             )
             .child(super::surface().child(section_head(chrome::section::COVER, div())).child(self.cover_block(cx)))
@@ -114,7 +116,7 @@ impl Studio {
                         this.overlay = Some(super::Overlay::Video);
                         cx.notify();
                     }))),
-                )).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("生成的曲目将在这里显示。")),
+                )).child(self.results_block(cx)),
             );
         if !self.preflight.is_empty() {
             page = page.child(super::surface().child(Label::new("导出预检")).child(preflight_lines(&self.preflight)));
@@ -180,16 +182,18 @@ impl Studio {
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
-                    .child(primary_btn(Button::new("pick-cover").label(chrome::label::UPLOAD_COVER).on_click(cx.listener(|this, _, window, cx| this.pick_cover(false, window, cx)))))
+                    .child(primary_btn(Button::new("make-cover").label(chrome::label::UPLOAD_COVER).on_click(cx.listener(|this, _, window, cx| this.open_cover_studio(window, cx)))))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(5.))
-                            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("或上传现成封面 · PNG / JPG"))
+                            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("或上传现成封面 · PNG / JPG / WebP / HEIC / HEIF"))
                             .child(file_slot("pick-cover-file", cover_name, cx.listener(|this, _, window, cx| this.pick_cover(false, window, cx)))),
                     )
-                    .child(quiet_btn(Button::new("clear-cover").label("移除封面").on_click(cx.listener(|this, _, _, cx| this.clear_cover(false, cx))))),
+                    .child(quiet_btn(Button::new("download-cover").label("下载当前封面").on_click(cx.listener(|this, _, _, cx| this.download_cover(cx)))))
+                    .child(quiet_btn(Button::new("clear-cover").label("移除封面").on_click(cx.listener(|this, _, _, cx| this.clear_cover(false, cx)))))
+                    .child(quiet_btn(Button::new("llm-cover").label("识别封面文字").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_cover(cx))))),
             )
             .child(
                 div()
@@ -202,12 +206,13 @@ impl Studio {
                             .flex()
                             .flex_col()
                             .gap(px(5.))
-                            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("封底（可选） · PNG / JPG"))
+                            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("封底（可选） · PNG / JPG / WebP / HEIC / HEIF"))
                             .child(file_slot("pick-back-file", back_name, cx.listener(|this, _, window, cx| this.pick_cover(true, window, cx)))),
                     )
                     .child(quiet_btn(Button::new("clear-back").label("移除封底").on_click(cx.listener(|this, _, _, cx| this.clear_cover(true, cx))))),
             )
             .child(div().text_size(px(12.)).line_height(px(19.)).text_color(rgb(0x66647a)).child("可留空。"))
+            .child(self.cover_preview_image(project.and_then(|item| if item.cover_path.trim().is_empty() { None } else { Some(item.cover_path.clone()) })))
     }
 
     fn settings_block(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -304,7 +309,19 @@ impl Studio {
     fn source_block(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col().gap_1();
         for (index, source) in project.sources.iter().enumerate() {
-            list = list.child(format!("{}. {source}", index + 1));
+            let label = format!("{}. {}", index + 1, names::source_leaf(source));
+            let last = index + 1 == project.sources.len();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(div().flex_1().text_size(px(13.)).child(label))
+                    .child(quiet_btn(Button::new(SharedString::from(format!("input-up-{index}"))).label("上移").disabled(index == 0).on_click(cx.listener(move |this, _, _, cx| this.move_source(index, -1, cx)))))
+                    .child(quiet_btn(Button::new(SharedString::from(format!("input-down-{index}"))).label("下移").disabled(last).on_click(cx.listener(move |this, _, _, cx| this.move_source(index, 1, cx)))))
+                    .child(quiet_btn(Button::new(SharedString::from(format!("input-remove-{index}"))).label("移除").on_click(cx.listener(move |this, _, _, cx| this.remove_source(index, cx))))),
+            );
         }
         let file_total = self.preview_duration.unwrap_or(0.0);
         let clock = format!("{} / {}", names::format_seconds(self.playhead), names::format_seconds(file_total));
@@ -331,10 +348,7 @@ impl Studio {
                     .flex_row()
                     .gap(px(8.))
                     .child(primary_btn(Button::new("add-audio").label(chrome::label::IMPORT_AUDIO).on_click(cx.listener(|this, _, window, cx| this.add_audio(window, cx)))))
-                    .child(quiet_btn(Button::new("llm-audio").label(chrome::label::RECOGNIZE_AUDIO).on_click(cx.listener(|this, _, _, cx| {
-                        this.overlay = Some(super::Overlay::Llm);
-                        cx.notify();
-                    })))),
+                    .child(quiet_btn(Button::new("llm-audio").label(chrome::label::RECOGNIZE_AUDIO).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_audio(cx))))),
             )
             .child(div().text_size(px(12.)).line_height(px(19.)).text_color(rgb(0x66647a)).child("支持 WAV、FLAC、APE、MP3、MKV 多选。"))
             .child(list)
@@ -444,7 +458,7 @@ impl Studio {
                 }))))
                 .child(text_btn(Button::new(SharedString::from(format!("match-{id}"))).label("匹配文件名").on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
-                    this.match_filenames(true, window, cx);
+                    this.open_name_panel(window, cx);
                 }))))
                 .child(text_btn(Button::new(SharedString::from(format!("model-name-{id}"))).label("用模型匹配").disabled(self.busy).on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
@@ -452,8 +466,7 @@ impl Studio {
                 }))))
                 .child(text_btn(Button::new(SharedString::from(format!("expand-{id}"))).label("展开乐章／分曲").on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
-                    this.movement_open = true;
-                    cx.notify();
+                    this.load_movements(cx);
                 }))))
                 .child(text_btn(Button::new(SharedString::from(format!("tags-{id}"))).label("编辑标签").on_click(cx.listener(move |this, _, window, cx| {
                     this.select_track(index, window, cx);
@@ -572,43 +585,23 @@ impl Studio {
                 .child(plain_btn(Button::new("merge-groups").label(chrome::label::MERGE_GROUPS).on_click(cx.listener(|this, _, window, cx| this.merge_groups(window, cx)))))
                 .child(plain_btn(Button::new("cycle-status").label(format!("状态: {}", project.status)).on_click(cx.listener(|this, _, _, cx| this.cycle_status(cx))))),
         );
+        if self.name_open {
+            body = body.child(self.name_panel(cx));
+        }
         if self.movement_open {
-            body = body.child(
-                div()
-                    .px(px(19.))
-                    .pb(px(8.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("每段用 | 分开. 第一段保留起点, 最后一段保留终点."))
-                    .child(flat_input(&self.movements))
-                    .child(if self.pending_parts.is_empty() { String::new() } else { format!("模型建议: {}", self.pending_parts) })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(8.))
-                            .child(primary_btn(Button::new("apply-movements").label("填入乐章").on_click(cx.listener(|this, _, window, cx| this.apply_movements(window, cx)))))
-                            .child(plain_btn(Button::new("model-movements").label("用模型匹配乐章").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_movements(cx)))))
-                            .child(plain_btn(Button::new("use-model-movements").label("采用模型乐章").disabled(self.pending_parts.is_empty()).on_click(cx.listener(|this, _, window, cx| {
-                                let text = this.pending_parts.clone();
-                                set_text(&this.movements, &text, window, cx);
-                                this.status = "已填入模型乐章, 可再改后点填入乐章.".into();
-                                cx.notify();
-                            }))))
-                            .child(quiet_btn(Button::new("close-movements").label("取消").on_click(cx.listener(|this, _, _, cx| {
-                                this.movement_open = false;
-                                cx.notify();
-                            })))),
-                    ),
-            );
+            body = body.child(self.movement_panel(cx));
         }
         body.child(div().px(px(19.)).pb(px(16.)).child(group_block(project, cx)))
     }
 
     fn source_picker(&self, project: &Project, prefix: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.track_index.and_then(|index| project.tracks.get(index)).map(|track| track.source.clone()).unwrap_or_default();
+        let current = if prefix == "preview" {
+            if self.listen_source.is_empty() { project.sources.first().cloned().unwrap_or_default() } else { self.listen_source.clone() }
+        } else {
+            self.track_index.and_then(|index| project.tracks.get(index)).map(|track| track.source.clone()).unwrap_or_default()
+        };
         let shown = if current.trim().is_empty() { "请选择音频文件".to_string() } else { names::source_leaf(&current) };
+        let preview_menu = prefix == "preview";
         let menu_id = format!("{prefix}-source");
         let open = self.open_menu.as_deref() == Some(menu_id.as_str());
         let sources = project.sources.clone();
@@ -643,7 +636,9 @@ impl Studio {
                         .child(leaf)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pull(cx);
-                            if let Some(track) = this.track_mut() {
+                            if preview_menu {
+                                this.listen_source = source.clone();
+                            } else if let Some(track) = this.track_mut() {
                                 track.source = source.clone();
                             }
                             this.open_menu = None;
@@ -661,11 +656,14 @@ impl Studio {
     }
 
     fn actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let row = div()
             .flex()
             .flex_row()
             .gap_2()
-            .child(plain_btn(Button::new("preview-wet").label(chrome::label::PREVIEW_FX).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preview(true, cx)))))
+            .child(plain_btn(Button::new("preview-wet").label(chrome::label::PREVIEW_FX).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| {
+                this.fx_open = !this.fx_open;
+                cx.notify();
+            }))))
             .child(plain_btn(Button::new("preflight").label(chrome::label::PREFLIGHT).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.preflight(cx)))))
             .child(primary_btn(Button::new("export-album").label(chrome::label::RUN).loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, window, cx| this.export_album(window, cx)))))
             .child(plain_btn(Button::new("local-script").label(chrome::label::LOCAL_SCRIPT).on_click(cx.listener(|this, _, _, cx| {
@@ -685,7 +683,12 @@ impl Studio {
                 cx.notify();
             }))))
             .child(super::field("MusicBrainz", &self.mb_query))
-            .child(Button::new("search-work").small().label("检索作品").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx))))
+            .child(Button::new("search-work").small().label("检索作品").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx)))));
+        let mut column = div().flex().flex_col().gap(px(8.)).child(row);
+        if self.fx_open {
+            column = column.child(self.fx_panel(cx));
+        }
+        column
     }
 
     fn mb_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -817,7 +820,7 @@ impl Studio {
             .into_any_element()
     }
 
-    pub(super) fn scripts_page(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn scripts_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let (title, detail) = chrome::heading(chrome::Place::Scripts);
         let Some(project) = self.project() else {
             return div()
@@ -829,12 +832,14 @@ impl Studio {
                 .child(div().text_color(rgb(0x66647a)).child(chrome::label::SCRIPT_EMPTY))
                 .into_any_element();
         };
-        let body = match export::prepare(project) {
-            Ok(plan) => chrome::script_preview(&export::describe_plan(&plan)),
+        let prepared = export::prepare(project);
+        let script = prepared.as_ref().ok().map(export::powershell);
+        let body = match &prepared {
+            Ok(plan) => chrome::script_preview(&export::describe_plan(plan)),
             Err(error) => error.to_string(),
         };
         let mut preview = div().p(px(16.)).rounded(px(12.)).bg(rgb(0x211b35)).text_color(rgb(0xf4edff)).flex().flex_col().gap_1();
-        for line in body.lines() {
+        for line in body.lines().take(40) {
             preview = preview.child(if line.is_empty() { " ".to_string() } else { line.to_string() });
         }
         div()
@@ -843,6 +848,14 @@ impl Studio {
             .gap(px(12.))
             .child(div().text_size(px(22.)).child(title))
             .child(div().text_color(rgb(0x66647a)).child(detail))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(plain_btn(Button::new("copy-script").label("复制").disabled(script.is_none()).on_click(cx.listener(|this, _, _, cx| this.copy_script(cx)))))
+                    .child(plain_btn(Button::new("download-script").label("下载 .ps1").disabled(script.is_none()).on_click(cx.listener(|this, _, _, cx| this.download_script(cx))))),
+            )
             .child(super::surface().child(div().text_size(px(16.)).child(chrome::label::SCRIPT_CARD)).child(preview))
             .into_any_element()
     }
@@ -862,14 +875,21 @@ impl Studio {
             .gap(px(12.))
             .child(div().text_size(px(22.)).child(title))
             .child(div().text_color(rgb(0x66647a)).child(detail))
-            .child(Button::new("clear-logs").small().danger().label("清除当前项目的记录").on_click(cx.listener(|this, _, _, cx| {
-                if let Some(id) = this.project().map(|project| project.id.clone()) {
-                    this.workspace.logs.retain(|entry| entry.project_id != id);
-                } else {
-                    this.workspace.logs.clear();
-                }
-                this.mark_dirty(cx);
-            })))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(Button::new("import-jsonl").small().label("导入 processing-*.jsonl").on_click(cx.listener(|this, _, _, cx| this.import_processing_log(cx))))
+                    .child(Button::new("clear-logs").small().danger().label("清除当前项目的记录").on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(id) = this.project().map(|project| project.id.clone()) {
+                            this.workspace.logs.retain(|entry| entry.project_id != id);
+                        } else {
+                            this.workspace.logs.clear();
+                        }
+                        this.mark_dirty(cx);
+                    }))),
+            )
             .child(super::surface().child(table))
             .into_any_element()
     }
@@ -1009,6 +1029,7 @@ impl Studio {
             self.show_error("请先建立项目.", cx);
             return;
         };
+        let mut first = String::new();
         for file in files {
             let Some(name) = file.file_name().map(|item| item.to_string_lossy().to_string()) else {
                 continue;
@@ -1020,9 +1041,16 @@ impl Studio {
                 project.sources.push(name.clone());
             }
             project.source_paths.insert(name.clone(), file.display().to_string());
+            if first.is_empty() {
+                first = name.clone();
+            }
             if project.tracks.len() == 1 && project.tracks[0].source.is_empty() {
                 project.tracks[0].source = name;
             }
+        }
+        drop(project);
+        if self.listen_source.trim().is_empty() && !first.is_empty() {
+            self.listen_source = first;
         }
         self.push_track(window, cx);
         self.mark_dirty(cx);
@@ -1195,26 +1223,14 @@ impl Studio {
 
     fn pick_cover(&mut self, back: bool, _window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let Some(file) = rfd::FileDialog::new().set_title(if back { "选择封底" } else { "选择封面" }).add_filter("图片", &["png", "jpg", "jpeg"]).pick_file() else {
+        let Some(file) = rfd::FileDialog::new().set_title(if back { "选择封底" } else { "选择封面" }).add_filter("图片", &["png", "jpg", "jpeg", "webp", "heic", "heif"]).pick_file() else {
             return;
         };
-        let leaf = file.file_name().map(|item| item.to_string_lossy().to_string()).unwrap_or_default();
-        if !names::cover_name(&leaf) {
-            self.show_error("封面须为 PNG 或 JPG.", cx);
-            return;
-        }
-        let Some(project) = self.project_mut() else {
-            return;
-        };
-        if back {
-            project.back_cover_file = leaf;
-            project.back_cover_path = file.display().to_string();
-        } else {
-            project.cover_file = leaf;
-            project.cover_path = file.display().to_string();
-            project.cover_status = "已选择".into();
-        }
-        self.mark_dirty(cx);
+        let binaries = self.ffmpeg.clone();
+        self.spawn_job(cx, move || match crate::coverart::prepare(&file, binaries.as_ref()) {
+            Ok((path, name)) => JobMsg::Artwork { back, path: path.display().to_string(), name },
+            Err(error) => JobMsg::Done { operation: "准备封面", result: Err(error.to_string()) },
+        });
     }
 
     fn merge_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1463,13 +1479,7 @@ impl Studio {
         let (tx, rx) = async_channel::unbounded();
         self.follow(rx, cx);
         self.spawn_job(cx, move || match export::export_album(&binaries, &plan, &parent, &cancel, &tx) {
-            Ok(reports) => {
-                let mut message = super::reports_message(&reports);
-                if !note.is_empty() {
-                    message = format!("{note}\n{message}");
-                }
-                JobMsg::Done { operation: "导出专辑", result: outcome(&reports, message) }
-            }
+            Ok(reports) => JobMsg::Exported { note, reports },
             Err(error) => JobMsg::Done { operation: "导出专辑", result: Err(error.to_string()) },
         });
     }
@@ -1536,6 +1546,12 @@ impl Studio {
                 return;
             }
         };
+        if !track.source.trim().is_empty() && self.listen_source != track.source {
+            self.listen_source = track.source.clone();
+            self.preview_key.clear();
+            self.preview_miss.clear();
+            self.preview_duration = None;
+        }
         self.playhead = start;
         self.clear_stitch();
         if processed {
@@ -1687,8 +1703,12 @@ impl Studio {
 
     fn preview_path(&self) -> Option<std::path::PathBuf> {
         let project = self.project()?;
-        let track = self.track_index.and_then(|index| project.tracks.get(index))?;
-        export::resolve_source(project, &track.source).ok()
+        let named = if !self.listen_source.trim().is_empty() {
+            self.listen_source.clone()
+        } else {
+            self.track_index.and_then(|index| project.tracks.get(index)).map(|track| track.source.clone()).filter(|source| !source.trim().is_empty()).or_else(|| project.sources.first().cloned())?
+        };
+        export::resolve_source(project, &named).ok()
     }
 
     fn ensure_preview_duration(&mut self, cx: &mut Context<Self>) {
@@ -2290,13 +2310,14 @@ impl Studio {
             let Some(hit) = catalog::suggest_work(&title) else {
                 continue;
             };
-            project.tracks[index].tags.title = hit.title.to_string();
-            if project.tracks[index].tags.composer.trim().is_empty() {
-                project.tracks[index].tags.composer = hit.composer.to_string();
-            }
             let filename = {
-                let tags = names::track_tags(project, &project.tracks[index], index);
-                let mut scratch = project.tracks[index].clone();
+                let scratch_source = project.tracks[index].clone();
+                let mut tags = names::track_tags(project, &scratch_source, index);
+                tags.title = hit.title.to_string();
+                if tags.composer.trim().is_empty() {
+                    tags.composer = hit.composer.to_string();
+                }
+                let mut scratch = scratch_source;
                 scratch.filename.clear();
                 names::filename_for(&rule, &scratch, &tags, index)
             };
@@ -2313,11 +2334,12 @@ impl Studio {
         self.status = format!("已按曲目表填写 {matched} 个文件名.").into();
     }
 
-    fn apply_movements(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_movements(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let titles = program::movement_titles(&text(&self.movements, cx));
+        let checked = self.movement_parts.iter().zip(self.movement_on.iter()).filter(|(_, on)| **on).map(|(title, _)| title.clone()).collect::<Vec<_>>();
+        let titles = if manual || checked.is_empty() { program::movement_titles(&text(&self.movements, cx)) } else { checked };
         if titles.is_empty() {
-            self.show_error("请先写下乐章, 用 | 分开.", cx);
+            self.show_error(if manual { "请先写下乐章, 用 | 分开." } else { "请至少选择或填写一项." }, cx);
             return;
         }
         let Some(index) = self.track_index else {
@@ -2968,6 +2990,799 @@ impl Studio {
         });
     }
 
+    fn session_note(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut column = div().flex().flex_col().gap(px(6.));
+        if !self.session_note.is_empty() {
+            column = column.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(self.session_note.clone()));
+        }
+        if !self.session_undo.is_empty() {
+            column = column.child(quiet_btn(Button::new("session-undo").label("撤销上次修改").on_click(cx.listener(|this, _, window, cx| this.undo_session(window, cx)))));
+        }
+        column
+    }
+
+    fn results_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.exports.is_empty() {
+            return div().text_size(px(12.)).text_color(rgb(0x66647a)).child("生成的曲目将在这里显示。");
+        }
+        let mut list = div().flex().flex_col().gap(px(6.));
+        for (index, item) in self.exports.iter().enumerate() {
+            let detail = if let Some(error) = &item.error {
+                error.clone()
+            } else if item.skipped {
+                "已跳过同名文件".into()
+            } else {
+                item.path.as_ref().map(|path| path.display().to_string()).unwrap_or_default()
+            };
+            let path = item.path.clone();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().flex().flex_col().child(div().text_size(px(13.)).child(item.target.clone())).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(detail)))
+                    .child(quiet_btn(Button::new(SharedString::from(format!("reveal-{index}"))).label("在文件夹中显示").disabled(path.is_none()).on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(path) = &path {
+                            reveal_path(path);
+                            this.status = "已在文件夹中显示.".into();
+                            cx.notify();
+                        }
+                    })))),
+            );
+        }
+        list
+    }
+
+    fn cover_preview_image(&self, path: Option<String>) -> AnyElement {
+        let Some(path) = path.filter(|item| std::path::Path::new(item).is_file()) else {
+            return div().into_any_element();
+        };
+        img(std::path::PathBuf::from(path)).w(px(220.)).h(px(220.)).into_any_element()
+    }
+
+    fn name_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div()
+            .px(px(19.))
+            .pb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(div().text_size(px(14.)).child("匹配规范文件名"))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("本地曲目表, MusicBrainz 和模型建议列在一起. 选择一个文件名."))
+            .child(Checkbox::new("update-name-tags").label("同时更新 Title 和 Composer").checked(self.name_update_tags).on_change(cx.listener(|this, value: &bool, _, cx| {
+                this.name_update_tags = *value;
+                cx.notify();
+            })))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(plain_btn(Button::new("name-refresh").label("重新查找").on_click(cx.listener(|this, _, window, cx| this.open_name_panel(window, cx)))))
+                    .child(plain_btn(Button::new("name-online").label("查找 MusicBrainz").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx)))))
+                    .child(plain_btn(Button::new("name-model").label("用模型匹配文件名").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_filename(cx)))))
+                    .child(quiet_btn(Button::new("name-close").label("关闭").on_click(cx.listener(|this, _, _, cx| {
+                        this.name_open = false;
+                        cx.notify();
+                    })))),
+            );
+        if self.name_choices.is_empty() {
+            list = list.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("还没有候选. 可补充曲名, 或查找 MusicBrainz."));
+        }
+        for (index, choice) in self.name_choices.iter().enumerate() {
+            let label = format!("{}.{}  {} · {}", choice.stem, self.project().map(|item| item.settings.format.to_lowercase()).unwrap_or_else(|| "flac".into()), choice.source, if choice.composer.is_empty() { choice.title.clone() } else { format!("{} · {}", choice.title, choice.composer) });
+            list = list.child(plain_btn(Button::new(SharedString::from(format!("pick-name-{index}"))).label(label).on_click(cx.listener(move |this, _, window, cx| this.choose_name(index, window, cx)))));
+        }
+        list
+    }
+
+    fn movement_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div()
+            .px(px(19.))
+            .pb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(div().text_size(px(14.)).child("展开乐章 / 分曲"))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("勾选要填入的乐章. 第一轨保留原起点, 最后一轨保留原终点."));
+        if self.movement_parts.is_empty() {
+            list = list.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("目录里没有这首的乐章. 可以手动输入, 或用模型匹配."));
+        }
+        for (index, part) in self.movement_parts.iter().enumerate() {
+            let on = self.movement_on.get(index).copied().unwrap_or(false);
+            list = list.child(Checkbox::new(SharedString::from(format!("movement-part-{index}"))).label(part.clone()).checked(on).on_change(cx.listener(move |this, value: &bool, _, cx| {
+                if index < this.movement_on.len() {
+                    this.movement_on[index] = *value;
+                }
+                cx.notify();
+            })));
+        }
+        list.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("手动输入或核对乐章, 每段用 | 分开."))
+            .child(flat_input(&self.movements))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(primary_btn(Button::new("apply-movements").label("按顺序填入分轨表").on_click(cx.listener(|this, _, window, cx| this.apply_movements(false, window, cx)))))
+                    .child(plain_btn(Button::new("apply-manual-movements").label("填入手动输入的乐章").on_click(cx.listener(|this, _, window, cx| this.apply_movements(true, window, cx)))))
+                    .child(plain_btn(Button::new("model-movements").label("用模型匹配乐章").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_movements(cx)))))
+                    .child(quiet_btn(Button::new("movements-all").label("全选").on_click(cx.listener(|this, _, _, cx| {
+                        this.movement_on.fill(true);
+                        cx.notify();
+                    }))))
+                    .child(quiet_btn(Button::new("movements-none").label("清空选择").on_click(cx.listener(|this, _, _, cx| {
+                        this.movement_on.fill(false);
+                        cx.notify();
+                    }))))
+                    .child(quiet_btn(Button::new("close-movements").label("关闭").on_click(cx.listener(|this, _, _, cx| {
+                        this.movement_open = false;
+                        cx.notify();
+                    })))),
+            )
+    }
+
+    fn fx_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let project = self.project().cloned();
+        let mut row = div().flex().flex_row().gap(px(8.));
+        if let Some(project) = &project {
+            for (index, track) in project.tracks.iter().enumerate() {
+                let name = if track.tags.title.trim().is_empty() { format!("第 {} 轨", index + 1) } else { format!("第 {} 轨 · {}", index + 1, track.tags.title) };
+                let selected = self.fx_track == Some(index);
+                row = row.child(Button::new(SharedString::from(format!("fx-track-{index}"))).small().selected(selected).label(name).on_click(cx.listener(move |this, _, _, cx| {
+                    this.fx_track = Some(index);
+                    this.preview_raw = None;
+                    this.preview_wet = None;
+                    cx.notify();
+                })));
+            }
+        }
+        row = row.child(Button::new("fx-current").small().selected(self.fx_track.is_none()).label("当前录音").on_click(cx.listener(|this, _, _, cx| {
+            this.fx_track = None;
+            this.preview_raw = None;
+            this.preview_wet = None;
+            cx.notify();
+        })));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(div().text_size(px(14.)).child("试听处理效果"))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("先选一轨, 再听开头或结尾 20 秒. 短于 20 秒时试听整段. 两段使用相同的时间范围."))
+            .child(row)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(Button::new("fx-begin").small().selected(!self.fx_ending).label("开头 20 秒").on_click(cx.listener(|this, _, _, cx| {
+                        this.fx_ending = false;
+                        cx.notify();
+                    })))
+                    .child(Button::new("fx-end").small().selected(self.fx_ending).label("结尾 20 秒").on_click(cx.listener(|this, _, _, cx| {
+                        this.fx_ending = true;
+                        cx.notify();
+                    })))
+                    .child(primary_btn(Button::new("fx-render").label("生成对比试听").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.render_compare(cx)))))
+                    .child(plain_btn(Button::new("fx-play-raw").label("播放原始").disabled(self.preview_raw.is_none()).on_click(cx.listener(|this, _, _, cx| this.play_saved(true, cx)))))
+                    .child(plain_btn(Button::new("fx-play-wet").label("播放处理后").disabled(self.preview_wet.is_none()).on_click(cx.listener(|this, _, _, cx| this.play_saved(false, cx))))),
+            )
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(if self.fx_note.is_empty() { "一次只播放一段, 方便对比.".to_string() } else { self.fx_note.clone() }))
+    }
+
+    pub(super) fn cover_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let layout = match self.cover_layout {
+            1 => crate::coverart::Layout::Dark,
+            2 => crate::coverart::Layout::Photo,
+            _ => crate::coverart::Layout::Ivory,
+        };
+        let preview = if std::path::Path::new(&self.cover_preview).is_file() {
+            img(std::path::PathBuf::from(&self.cover_preview)).w(px(280.)).h(px(280.)).into_any_element()
+        } else {
+            div().w(px(280.)).h(px(280.)).bg(rgb(0xf4eee2)).flex().items_center().justify_center().child("上传场照后预览封面").into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("1600 x 1600 PNG. 场照只裁剪和缩放, 文字可直接编辑."))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(16.))
+                    .child(preview)
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(8.))
+                                    .child(plain_btn(Button::new("cover-photo").label("选择场照").on_click(cx.listener(|this, _, _, cx| this.pick_cover_photo(cx)))))
+                                    .child(plain_btn(Button::new("cover-design").label("发送场次信息并设计封面").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.design_cover(cx)))))
+                                    .child(quiet_btn(Button::new("cover-undo").label("撤销 AI 方案").disabled(self.cover_undo.is_none()).on_click(cx.listener(|this, _, window, cx| this.undo_cover(window, cx)))))
+                                    .child(quiet_btn(Button::new("cover-read").label("识别场照文字").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_photo(cx))))),
+                            )
+                            .child(div().text_size(px(12.)).child(format!("排版: {}", layout.label())))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(8.))
+                                    .child(quiet_btn(Button::new("layout-ivory").label(crate::coverart::Layout::Ivory.label()).on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_layout = 0;
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("layout-dark").label(crate::coverart::Layout::Dark.label()).on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_layout = 1;
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("layout-photo").label(crate::coverart::Layout::Photo.label()).on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_layout = 2;
+                                        cx.notify();
+                                    })))),
+                            )
+                            .child(super::field("专辑标题", &self.cover_title))
+                            .child(super::field("演出者", &self.cover_performer))
+                            .child(super::field("音乐厅, 城市与日期", &self.cover_detail))
+                            .child(div().text_size(px(12.)).child(format!("缩放 {:.2}  水平 {:.2}  垂直 {:.2}", self.cover_zoom, self.cover_x, self.cover_y)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(8.))
+                                    .child(quiet_btn(Button::new("zoom-out").label("缩小").on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_zoom = (this.cover_zoom - 0.1).max(1.0);
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("zoom-in").label("放大").on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_zoom = (this.cover_zoom + 0.1).min(3.0);
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("crop-left").label("向左").on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_x = (this.cover_x - 0.05).max(0.0);
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("crop-right").label("向右").on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_x = (this.cover_x + 0.05).min(1.0);
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("crop-up").label("向上").on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_y = (this.cover_y - 0.05).max(0.0);
+                                        cx.notify();
+                                    }))))
+                                    .child(quiet_btn(Button::new("crop-down").label("向下").on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_y = (this.cover_y + 0.05).min(1.0);
+                                        cx.notify();
+                                    })))),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(8.))
+                                    .child(plain_btn(Button::new("cover-refresh").label("更新预览").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.refresh_cover(cx)))))
+                                    .child(plain_btn(Button::new("cover-download").label("下载 PNG").disabled(self.cover_preview.is_empty()).on_click(cx.listener(|this, _, _, cx| this.save_cover_png(cx)))))
+                                    .child(primary_btn(Button::new("cover-apply").label("用作专辑封面").disabled(self.cover_preview.is_empty()).on_click(cx.listener(|this, _, _, cx| this.use_rendered_cover(cx))))),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn english_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project().cloned() else {
+            self.show_error("请先建立项目.", cx);
+            return;
+        };
+        let review = crate::english::normalize(&[
+            ("name", project.name.as_str()),
+            ("performer", project.performer.as_str()),
+            ("conductor", project.conductor.as_str()),
+            ("orchestra", project.orchestra.as_str()),
+            ("composer", project.composer.as_str()),
+            ("date", project.date.as_str()),
+            ("city", project.city.as_str()),
+            ("venue", project.venue.as_str()),
+            ("origin", project.origin.as_str()),
+        ]);
+        if !review.changes.is_empty() {
+            self.session_undo = review.changes.iter().map(|item| (item.key.to_string(), item.before.clone(), item.after.clone())).collect();
+            if let Some(project) = self.project_mut() {
+                for change in &review.changes {
+                    write_session(project, &change.key, &change.after);
+                }
+            }
+        }
+        let mut parts = Vec::new();
+        if !review.changes.is_empty() {
+            parts.push(format!("已更新 {} 项", review.changes.len()));
+        }
+        if !review.verified.is_empty() {
+            parts.push(format!("{} 项已符合目录写法或日期格式", review.verified.len()));
+        }
+        if !review.notes.is_empty() {
+            parts.push(format!("{} 项待核对", review.notes.len()));
+        }
+        let mut note = if parts.is_empty() { "暂无可自动更新的场次字段.".to_string() } else { format!("{}.", parts.join(", ")) };
+        for change in &review.changes {
+            note.push_str(&format!("\n{}: {} → {}", crate::english::field_label(&change.key), change.before, change.after));
+        }
+        for item in &review.notes {
+            note.push_str(&format!("\n{}: {}", crate::english::field_label(&item.key), item.note));
+        }
+        self.session_note = note;
+        self.push(window, cx);
+        self.mark_dirty(cx);
+    }
+
+    fn undo_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        if let Some(project) = self.project_mut() {
+            for (key, before, after) in &self.session_undo {
+                let current = read_session(project, key);
+                if current == *after {
+                    write_session(project, key, before);
+                }
+            }
+        }
+        self.session_undo.clear();
+        self.session_note = "已撤销上次自动修改.".into();
+        self.push(window, cx);
+        self.mark_dirty(cx);
+    }
+
+    fn move_source(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
+        self.pull(cx);
+        {
+            let Some(project) = self.project_mut() else { return };
+            let next = index as isize + delta;
+            if next < 0 || next as usize >= project.sources.len() {
+                return;
+            }
+            project.sources.swap(index, next as usize);
+        }
+        self.mark_dirty(cx);
+    }
+
+    fn remove_source(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let removed = {
+            let Some(project) = self.project_mut() else { return };
+            if index >= project.sources.len() {
+                return;
+            }
+            let name = project.sources.remove(index);
+            project.source_paths.remove(&name);
+            name
+        };
+        if self.listen_source == removed {
+            self.listen_source = self.project().and_then(|project| project.sources.first().cloned()).unwrap_or_default();
+            self.preview_key.clear();
+            self.preview_duration = None;
+        }
+        self.mark_dirty(cx);
+    }
+
+    fn open_name_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let title = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index)).map(|track| track.tags.title.clone())).unwrap_or_default();
+        if title.trim().chars().count() < 2 {
+            self.show_error("请先填写曲目名.", cx);
+            return;
+        }
+        set_text(&self.mb_query, title.trim(), window, cx);
+        self.name_open = true;
+        self.rebuild_name_choices();
+        self.search_work(cx);
+        cx.notify();
+    }
+
+    pub(super) fn rebuild_name_choices(&mut self) {
+        let Some(project) = self.project() else { return };
+        let Some(index) = self.track_index else { return };
+        let Some(track) = project.tracks.get(index) else { return };
+        let query = track.tags.title.clone();
+        let mut choices = Vec::new();
+        let mut push = |title: String, composer: String, source: &str, choices: &mut Vec<super::FileCandidate>, project: &Project, track: &Track, index: usize| {
+            for (label, with_composer) in [(title.clone(), false), (if composer.is_empty() { String::new() } else { format!("{composer} - {title}") }, true)] {
+                if label.trim().is_empty() {
+                    continue;
+                }
+                let mut tags = names::track_tags(project, track, index);
+                tags.title = label;
+                let mut scratch = track.clone();
+                scratch.filename.clear();
+                let stem = names::filename_for("{Track} - {Title}", &scratch, &tags, index);
+                if stem.is_empty() || choices.iter().any(|item| item.stem == stem) {
+                    continue;
+                }
+                choices.push(super::FileCandidate { title: if with_composer { title.clone() } else { tags.title.clone() }, composer: composer.clone(), source: source.into(), stem });
+            }
+        };
+        let owned_track = track.clone();
+        let owned = project.clone();
+        drop(track);
+        drop(project);
+        let track = owned_track;
+        let project = owned;
+        for hit in catalog::search_works(&query) {
+            push(hit.title.into(), hit.composer.into(), "本地曲目表", &mut choices, &project, &track, index);
+        }
+        for hit in &self.mb_hits {
+            push(hit.title.clone(), hit.artist.clone(), "MusicBrainz", &mut choices, &project, &track, index);
+        }
+        for hit in &self.name_hits {
+            push(hit.title.clone(), hit.composer.clone(), "模型建议 · 待核对", &mut choices, &project, &track, index);
+        }
+        self.name_choices = choices;
+    }
+
+    fn choose_name(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(choice) = self.name_choices.get(index).cloned() else { return };
+        self.pull(cx);
+        let Some(track_index) = self.track_index else { return };
+        if let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(track_index)) {
+            track.filename = choice.stem;
+            if self.name_update_tags {
+                track.tags.title = choice.title;
+                if !choice.composer.is_empty() {
+                    track.tags.composer = choice.composer;
+                }
+            }
+        }
+        self.name_open = false;
+        self.push_track(window, cx);
+        self.mark_dirty(cx);
+        self.status = "已选用这个文件名.".into();
+    }
+
+    fn load_movements(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(track) = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index))).cloned() else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        if track.tags.title.trim().is_empty() {
+            self.show_error("请先填写整部作品或组曲名称.", cx);
+            return;
+        }
+        let composer = if track.tags.composer.trim().is_empty() { self.project().map(|item| item.composer.clone()).unwrap_or_default() } else { track.tags.composer.clone() };
+        if let Some(list) = catalog::find_movements(&track.tags.title, &composer) {
+            self.movement_parts = (0..list.parts.len()).map(|index| catalog::movement_title(list, index)).collect();
+            self.movement_on = (0..list.parts.len()).map(|index| index < list.main).collect();
+            self.status = format!("已找到 {}, 勾选后填入.", list.title).into();
+        } else {
+            self.movement_parts.clear();
+            self.movement_on.clear();
+            self.status = "目录里没有这首的乐章. 可以手动输入, 或用模型匹配.".into();
+        }
+        self.movement_open = true;
+        cx.notify();
+    }
+
+    fn recognize_cover(&mut self, cx: &mut Context<Self>) {
+        let path = self.project().map(|item| item.cover_path.clone()).unwrap_or_default();
+        if path.trim().is_empty() || !std::path::Path::new(&path).is_file() {
+            self.show_error("请先上传封面.", cx);
+            return;
+        }
+        self.intake_files = vec![std::path::PathBuf::from(path)];
+        self.intake_session = false;
+        self.recognize_intake(cx);
+    }
+
+    fn recognize_audio(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.preview_path() else {
+            self.show_error("请先导入并选择录音.", cx);
+            return;
+        };
+        let Some(binaries) = self.ffmpeg.clone() else {
+            self.show_error("未找到裁剪版 FFmpeg.", cx);
+            return;
+        };
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        let cancel = self.cancel.clone();
+        self.spawn_job(cx, move || {
+            let info = match ffmpeg::probe(&binaries, &path, &cancel) {
+                Ok(info) => info,
+                Err(error) => return JobMsg::Done { operation: "识别录音标签", result: Err(error.to_string()) },
+            };
+            let mut lines = vec![format!("文件名: {}", path.file_name().map(|item| item.to_string_lossy().to_string()).unwrap_or_default())];
+            for (key, value) in &info.tags {
+                lines.push(format!("{key}: {value}"));
+            }
+            match llm::recognize(&config, "tags", &lines.join("\n"), &[]) {
+                Ok(text) => JobMsg::Import { cd: false, include_tracks: true, text },
+                Err(error) => JobMsg::Done { operation: "识别录音标签", result: Err(error.to_string()) },
+            }
+        });
+    }
+
+    fn download_cover(&mut self, cx: &mut Context<Self>) {
+        let path = self.project().map(|item| item.cover_path.clone()).unwrap_or_default();
+        if path.trim().is_empty() {
+            self.show_error("还没有封面.", cx);
+            return;
+        }
+        let name = self.project().map(|item| item.cover_file.clone()).unwrap_or_else(|| "cover.png".into());
+        let Some(dest) = rfd::FileDialog::new().set_title("下载当前封面").set_file_name(&name).save_file() else { return };
+        match std::fs::copy(&path, &dest) {
+            Ok(_) => self.status = format!("已保存 {}", dest.display()).into(),
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn open_cover_studio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project().cloned() else {
+            self.show_error("请先建立项目.", cx);
+            return;
+        };
+        let performer = [project.performer.as_str(), project.conductor.as_str(), project.orchestra.as_str()].into_iter().filter(|item| !item.trim().is_empty()).collect::<Vec<_>>().join(" · ");
+        let detail = [project.venue.as_str(), project.city.as_str(), project.date.as_str()].into_iter().filter(|item| !item.trim().is_empty()).collect::<Vec<_>>().join(" · ");
+        let title = if project.name.trim().is_empty() { project.composer.clone() } else { project.name.clone() };
+        set_text(&self.cover_title, &title.chars().take(120).collect::<String>(), window, cx);
+        set_text(&self.cover_performer, &performer.chars().take(120).collect::<String>(), window, cx);
+        set_text(&self.cover_detail, &detail.chars().take(150).collect::<String>(), window, cx);
+        self.overlay = Some(super::Overlay::Cover);
+        cx.notify();
+    }
+
+    fn pick_cover_photo(&mut self, cx: &mut Context<Self>) {
+        let Some(file) = rfd::FileDialog::new().set_title("选择场照").add_filter("图片", &["png", "jpg", "jpeg", "webp", "heic", "heif"]).pick_file() else { return };
+        let binaries = self.ffmpeg.clone();
+        self.spawn_job(cx, move || match crate::coverart::prepare(&file, binaries.as_ref()) {
+            Ok((path, _)) => JobMsg::CoverPhoto(path.display().to_string()),
+            Err(error) => JobMsg::Done { operation: "读取场照", result: Err(error.to_string()) },
+        });
+    }
+
+    fn refresh_cover(&mut self, cx: &mut Context<Self>) {
+        let photo = self.cover_photo.clone();
+        if photo.trim().is_empty() {
+            self.show_error("请先上传场照.", cx);
+            return;
+        }
+        let spec = self.cover_spec(cx);
+        self.spawn_job(cx, move || match crate::coverart::load_raster(std::path::Path::new(&photo)) {
+            Ok(image) => {
+                let rendered = crate::coverart::render(&image, &spec, crate::coverart::SIZE);
+                let path = crate::store::temp_dir().join(format!("cover-preview-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|item| item.as_millis()).unwrap_or(0)));
+                match crate::coverart::write_png(&rendered, &path) {
+                    Ok(()) => JobMsg::CoverPreview(path.display().to_string()),
+                    Err(error) => JobMsg::Done { operation: "封面预览", result: Err(error.to_string()) },
+                }
+            }
+            Err(error) => JobMsg::Done { operation: "封面预览", result: Err(error.to_string()) },
+        });
+    }
+
+    fn cover_spec(&self, cx: &Context<Self>) -> crate::coverart::CoverSpec {
+        crate::coverart::CoverSpec {
+            layout: match self.cover_layout {
+                1 => crate::coverart::Layout::Dark,
+                2 => crate::coverart::Layout::Photo,
+                _ => crate::coverart::Layout::Ivory,
+            },
+            title: text(&self.cover_title, cx),
+            performer: text(&self.cover_performer, cx),
+            detail: text(&self.cover_detail, cx),
+            zoom: self.cover_zoom,
+            horizontal: self.cover_x,
+            vertical: self.cover_y,
+        }
+    }
+
+    fn design_cover(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project().cloned() else { return };
+        let works = project.tracks.iter().filter(|track| !track.tags.title.trim().is_empty()).take(12).map(|track| serde_json::json!({"title": track.tags.title, "composer": track.tags.composer})).collect::<Vec<_>>();
+        let request = serde_json::json!({
+            "session": {"name": project.name, "performer": project.performer, "conductor": project.conductor, "composer": project.composer, "orchestra": project.orchestra, "venue": project.venue, "city": project.city, "date": project.date},
+            "works": works,
+            "layouts": ["ivory", "dark", "photo"]
+        })
+        .to_string();
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.spawn_job(cx, move || match llm::recognize(&config, "cover", &request, &[]) {
+            Ok(text) => match crate::coverart::parse_design(&text) {
+                Ok(design) => JobMsg::CoverDesign(design),
+                Err(error) => JobMsg::Done { operation: "设计封面", result: Err(error.to_string()) },
+            },
+            Err(error) => JobMsg::Done { operation: "设计封面", result: Err(error.to_string()) },
+        });
+    }
+
+    fn undo_cover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((title, performer, detail, layout)) = self.cover_undo.clone() else { return };
+        set_text(&self.cover_title, &title, window, cx);
+        set_text(&self.cover_performer, &performer, window, cx);
+        set_text(&self.cover_detail, &detail, window, cx);
+        self.cover_layout = layout;
+        self.cover_undo = None;
+        self.status = "已恢复生成前的文案和排版.".into();
+        cx.notify();
+    }
+
+    fn recognize_photo(&mut self, cx: &mut Context<Self>) {
+        let path = if self.cover_photo.trim().is_empty() { self.cover_preview.clone() } else { self.cover_photo.clone() };
+        if path.trim().is_empty() || !std::path::Path::new(&path).is_file() {
+            self.show_error("请先上传场照.", cx);
+            return;
+        }
+        self.intake_files = vec![std::path::PathBuf::from(path)];
+        self.intake_session = false;
+        self.overlay = None;
+        self.recognize_intake(cx);
+    }
+
+    fn save_cover_png(&mut self, cx: &mut Context<Self>) {
+        if self.cover_preview.trim().is_empty() {
+            self.show_error("请先更新预览.", cx);
+            return;
+        }
+        let Some(dest) = rfd::FileDialog::new().set_title("下载 PNG").set_file_name("cover.png").save_file() else { return };
+        match std::fs::copy(&self.cover_preview, &dest) {
+            Ok(_) => self.status = format!("已保存 {}", dest.display()).into(),
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn use_rendered_cover(&mut self, cx: &mut Context<Self>) {
+        if self.cover_preview.trim().is_empty() {
+            self.show_error("请先更新预览.", cx);
+            return;
+        }
+        if let Some(project) = self.project_mut() {
+            project.cover_file = "cover.png".into();
+            project.cover_path = self.cover_preview.clone();
+            project.cover_status = "已准备".into();
+        }
+        self.overlay = None;
+        self.status = "已用作专辑封面.".into();
+        self.mark_dirty(cx);
+    }
+
+    fn render_compare(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project().cloned() else { return };
+        let (source_name, start, end) = if let Some(index) = self.fx_track {
+            let Some(track) = project.tracks.get(index) else {
+                self.show_error("请先选择曲目.", cx);
+                return;
+            };
+            let start = names::time_seconds(&track.start).ok().flatten().unwrap_or(0.0);
+            let end = names::time_seconds(&track.end).ok().flatten();
+            (track.source.clone(), start, end)
+        } else {
+            (self.listen_source.clone(), 0.0, None)
+        };
+        let source = if source_name.trim().is_empty() { self.preview_path() } else { export::resolve_source(&project, &source_name).ok() };
+        let Some(source) = source else {
+            self.show_error("请先导入录音.", cx);
+            return;
+        };
+        let Some(binaries) = self.ffmpeg.clone() else {
+            self.show_error("未找到裁剪版 FFmpeg.", cx);
+            return;
+        };
+        let settings = project.settings.clone();
+        let ending = self.fx_ending;
+        let cancel = self.cancel.clone();
+        self.spawn_job(cx, move || {
+            let info = match ffmpeg::probe(&binaries, &source, &cancel) {
+                Ok(info) => info,
+                Err(error) => return JobMsg::Done { operation: "试听处理效果", result: Err(error.to_string()) },
+            };
+            let duration = info.duration.unwrap_or(0.0);
+            let limit = end.unwrap_or(duration);
+            let available = (limit - start).max(0.0);
+            if available <= 0.0 {
+                return JobMsg::Done { operation: "试听处理效果", result: Err("这段没有可试听的长度.".into()) };
+            }
+            let seconds = available.min(20.0);
+            let from = if ending { (limit - seconds).max(start) } else { start };
+            let filters = match effects::filter_chain(&settings, Some(seconds), info.channels) {
+                Ok(filters) => filters,
+                Err(error) => return JobMsg::Done { operation: "试听处理效果", result: Err(error.to_string()) },
+            };
+            let raw = match export::preview_span(&binaries, &source, from, seconds, &[], settings.rate, &cancel) {
+                Ok(path) => path,
+                Err(error) => return JobMsg::Done { operation: "试听处理效果", result: Err(error.to_string()) },
+            };
+            let wet = match export::preview_span(&binaries, &source, from, seconds, &filters, settings.rate, &cancel) {
+                Ok(path) => path,
+                Err(error) => return JobMsg::Done { operation: "试听处理效果", result: Err(error.to_string()) },
+            };
+            JobMsg::Compare { raw, wet, note: format!("两段试听使用相同的时间范围: {} – {}.", names::format_seconds(from), names::format_seconds(from + seconds)) }
+        });
+    }
+
+    fn play_saved(&mut self, raw: bool, cx: &mut Context<Self>) {
+        let path = if raw { self.preview_raw.clone() } else { self.preview_wet.clone() };
+        let Some(path) = path else { return };
+        self.player.stop();
+        match self.player.play(path) {
+            Ok(()) => {
+                self.playing = true;
+                self.status = if raw { "正在播放原始片段.".into() } else { "正在播放处理后的片段.".into() };
+            }
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn script_now(&self) -> Option<String> {
+        self.project().and_then(|project| export::prepare(project).ok()).map(|plan| export::powershell(&plan))
+    }
+
+    fn copy_script(&mut self, cx: &mut Context<Self>) {
+        let Some(script) = self.script_now() else {
+            self.show_error("还不能生成脚本. 请先补齐场次和曲目.", cx);
+            return;
+        };
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(script)) {
+            Ok(()) => self.status = "已复制 PowerShell 脚本.".into(),
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn download_script(&mut self, cx: &mut Context<Self>) {
+        let Some(script) = self.script_now() else {
+            self.show_error("还不能生成脚本. 请先补齐场次和曲目.", cx);
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new().set_title("下载 .ps1").set_file_name("split.ps1").save_file() else { return };
+        match std::fs::write(&path, script.replace('\n', "\r\n")) {
+            Ok(()) => self.status = format!("已保存 {}", path.display()).into(),
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn import_processing_log(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new().set_title("导入处理记录").add_filter("JSONL", &["jsonl", "txt"]).pick_file() else { return };
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let rows = export::parse_processing_log(&text);
+        if rows.is_empty() {
+            self.show_error("没有读到 processing 记录.", cx);
+            return;
+        }
+        let project_id = self.project().map(|item| item.id.clone()).unwrap_or_default();
+        let project_name = self.project().map(|item| item.name.clone()).unwrap_or_default();
+        for row in &rows {
+            self.workspace.logs.push(crate::model::LogEntry {
+                id: crate::model::new_id(),
+                project_id: if row.project_id.is_empty() { project_id.clone() } else { row.project_id.clone() },
+                project_name: project_name.clone(),
+                time: if row.time.is_empty() { chrono::Local::now().format("%Y-%m-%d %H:%M").to_string() } else { row.time.clone() },
+                operation: row.output.clone(),
+                result: if row.status == "success" { "成功".into() } else { "失败".into() },
+                message: if row.message.is_empty() { row.source.clone() } else { row.message.clone() },
+            });
+        }
+        self.status = format!("已导入 {} 条处理记录.", rows.len()).into();
+        self.mark_dirty(cx);
+    }
+
     fn apply_english(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = self.review.iter().filter(|item| item.apply && !item.after.trim().is_empty()).map(|item| (item.key.clone(), item.after.clone())).collect::<Vec<_>>();
         let Some(project) = self.project_mut() else {
@@ -2979,6 +3794,44 @@ impl Studio {
         self.push(window, cx);
         self.status = format!("已应用 {} 项.", chosen.len()).into();
         self.mark_dirty(cx);
+    }
+}
+
+fn write_session(project: &mut Project, key: &str, value: &str) {
+    if key == "date" {
+        project.date = value.trim().to_string();
+        return;
+    }
+    llm::apply_field(project, key, value);
+}
+
+fn read_session(project: &Project, key: &str) -> String {
+    match key {
+        "name" => project.name.clone(),
+        "performer" => project.performer.clone(),
+        "conductor" => project.conductor.clone(),
+        "orchestra" => project.orchestra.clone(),
+        "composer" => project.composer.clone(),
+        "date" => project.date.clone(),
+        "city" => project.city.clone(),
+        "venue" => project.venue.clone(),
+        "origin" => project.origin.clone(),
+        _ => String::new(),
+    }
+}
+
+fn reveal_path(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").args(["-R", &path.display().to_string()]).spawn();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = path;
     }
 }
 

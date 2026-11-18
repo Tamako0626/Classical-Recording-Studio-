@@ -4,6 +4,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde_json::{json, Value};
+
 use crate::effects::filter_chain;
 use crate::error::{StudioError, StudioResult};
 use crate::ffmpeg::{self, Binaries, Cancel, MediaInfo};
@@ -847,4 +849,162 @@ pub fn preview_span(
     args.push(path.display().to_string());
     ffmpeg::run(&binaries.ffmpeg, &args, true, None, cancel)?;
     Ok(path)
+}
+
+pub fn powershell(plan: &Plan) -> String {
+    let jobs = plan
+        .jobs
+        .iter()
+        .map(|job| {
+            let mut metadata = serde_json::Map::new();
+            for key in TAG_KEYS {
+                let value = job.tags.get(key).trim();
+                if !value.is_empty() {
+                    metadata.insert(key.into(), Value::String(value.chars().take(300).collect()));
+                }
+            }
+            json!({
+                "source": job.source.display().to_string(),
+                "start": job.start,
+                "end": job.end,
+                "target": job.target,
+                "metadata": metadata,
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = json!({ "output": plan.folder_name, "format": plan.format, "jobs": jobs });
+    let encoded = base64_encode(body.to_string().as_bytes());
+    format!(
+        r#"# Classical Recording Studio
+# Run from any folder. Sources use the paths saved when this script was written.
+$ErrorActionPreference = 'Stop'
+$plan = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))
+$ffmpeg = (Get-Command ffmpeg -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$out = Join-Path (Get-Location) $plan.output
+[void][IO.Directory]::CreateDirectory($out)
+$log = Join-Path $out ('processing-' + [Guid]::NewGuid().ToString('N') + '.jsonl')
+$utf8 = New-Object Text.UTF8Encoding($false)
+function Write-Result($job, [string]$status, [string]$message) {{
+  $entry = [ordered]@{{ schema = 1; projectId = ''; time = [DateTimeOffset]::Now.ToString('o'); status = $status; source = $job.source; output = $job.target; message = $message }}
+  [IO.File]::AppendAllText($log, (($entry | ConvertTo-Json -Compress) + [Environment]::NewLine), $utf8)
+  Write-Host ('[' + $status + '] ' + $job.target + ' ' + $message)
+}}
+$failed = 0
+foreach ($job in $plan.jobs) {{
+  $target = Join-Path $out $job.target
+  $parent = Split-Path -Parent $target
+  if ($parent) {{ [void][IO.Directory]::CreateDirectory($parent) }}
+  try {{
+    $ff = @('-hide_banner','-nostdin','-y','-v','error','-ss',[string]$job.start,'-i',[string]$job.source,'-map','0:a:0')
+    if ($null -ne $job.end) {{ $ff += @('-t', [string]([double]$job.end - [double]$job.start)) }}
+    foreach ($pair in $job.metadata.PSObject.Properties) {{ $ff += @('-metadata', ($pair.Name + '=' + $pair.Value)) }}
+    switch ($plan.format) {{
+      'MP3' {{ $ff += @('-c:a','libmp3lame','-q:a','2') }}
+      'WAV' {{ $ff += @('-c:a','pcm_s16le') }}
+      'MKV' {{ $ff += @('-c:a','flac') }}
+      default {{ $ff += @('-c:a','flac') }}
+    }}
+    $ff += $target
+    & $ffmpeg @ff
+    if ($LASTEXITCODE -ne 0) {{ throw ('ffmpeg exit ' + $LASTEXITCODE) }}
+    Write-Result $job 'success' ''
+  }} catch {{
+    $failed++
+    Write-Result $job 'failed' $_.Exception.Message
+  }}
+}}
+Write-Host ('Log: ' + $log)
+if ($failed) {{ Write-Warning ('Failed items: ' + $failed) }}
+"#
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessingRow {
+    pub project_id: String,
+    pub time: String,
+    pub status: String,
+    pub source: String,
+    pub output: String,
+    pub message: String,
+}
+
+pub fn parse_processing_log(text: &str) -> Vec<ProcessingRow> {
+    text.lines()
+        .filter_map(|line| {
+            let value: Value = serde_json::from_str(line.trim()).ok()?;
+            let output = value.get("output").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            if output.is_empty() {
+                return None;
+            }
+            Some(ProcessingRow {
+                project_id: value.get("projectId").and_then(Value::as_str).unwrap_or("").to_string(),
+                time: value.get("time").and_then(Value::as_str).unwrap_or("").chars().take(25).collect(),
+                status: value.get("status").and_then(Value::as_str).unwrap_or("").to_string(),
+                source: value.get("source").and_then(Value::as_str).unwrap_or("").to_string(),
+                output,
+                message: value.get("message").and_then(Value::as_str).unwrap_or("").chars().take(500).collect(),
+            })
+        })
+        .collect()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let value = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8) | bytes[index + 2] as u32;
+        for shift in [18, 12, 6, 0] {
+            out.push(TABLE[((value >> shift) & 63) as usize] as char);
+        }
+        index += 3;
+    }
+    let rest = bytes.len() - index;
+    if rest == 1 {
+        let value = (bytes[index] as u32) << 16;
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rest == 2 {
+        let value = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push(TABLE[((value >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+    use crate::model::Project;
+
+    #[test]
+    fn powershell_records_a_jsonl_log_and_the_plan_round_trips() {
+        let file = std::env::temp_dir().join(format!("crs-script-{}.wav", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        let mut project = Project::blank();
+        project.name = "Recital".into();
+        project.sources.push("concert.wav".into());
+        project.source_paths.insert("concert.wav".into(), file.display().to_string());
+        project.tracks[0].source = "concert.wav".into();
+        project.tracks[0].tags.title = "Sonata".into();
+        project.tracks[0].tags.composer = "Beethoven".into();
+        project.settings.metadata = false;
+        project.settings.cover = false;
+        let plan = prepare(&project).unwrap();
+        let _ = std::fs::remove_file(&file);
+        let script = powershell(&plan);
+        assert!(script.contains("processing-"));
+        assert!(script.contains("ffmpeg"));
+        let encoded = script.split("FromBase64String('").nth(1).unwrap().split('\'').next().unwrap();
+        assert!(!encoded.is_empty());
+        let rows = parse_processing_log(r#"{"schema":1,"projectId":"p1","time":"2024-05-02T10:00:00Z","status":"success","source":"a.wav","output":"01.flac","message":""}"#);
+        assert_eq!(rows[0].output, "01.flac");
+        assert_eq!(rows[0].status, "success");
+        assert!(parse_processing_log("not json").is_empty());
+    }
 }
