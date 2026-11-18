@@ -1922,7 +1922,7 @@ impl Render for Studio {
 }
 
 fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<f32>>>, entity: Entity<Studio>) -> impl IntoElement {
-    use gpui_kit::gpui_base::ScrollbarHandle;
+    use gpui_kit::base::ScrollbarHandle;
     use gpui_kit::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, canvas, fill};
     let scroll_move = scroll.clone();
     let scroll_up = scroll.clone();
@@ -2000,7 +2000,7 @@ struct BarMetrics {
 }
 
 fn bar_track(scroll: &gpui_kit::ScrollHandle, fallback: gpui_kit::Bounds<gpui_kit::Pixels>) -> gpui_kit::Bounds<gpui_kit::Pixels> {
-    use gpui_kit::gpui_base::ScrollbarHandle;
+    use gpui_kit::base::ScrollbarHandle;
     let viewport = scroll.viewport_bounds();
     if viewport.size.height.as_f32() < 2. || viewport.size.width.as_f32() < 2. {
         return fallback;
