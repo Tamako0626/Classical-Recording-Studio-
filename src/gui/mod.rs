@@ -640,7 +640,7 @@ impl Studio {
         studio.push(window, cx);
         studio.ready = true;
         let view = cx.entity().downgrade();
-        studio._subscriptions.push(window.on_window_should_close(cx, move |_window, app| {
+        window.on_window_should_close(cx, move |_window, app| {
             let Some(view) = view.upgrade() else {
                 return true;
             };
@@ -653,7 +653,7 @@ impl Studio {
                 cx.notify();
             });
             false
-        }));
+        });
         studio
     }
 
