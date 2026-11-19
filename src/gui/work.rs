@@ -682,9 +682,7 @@ impl Studio {
             }))))
             .child(plain_btn(Button::new("stop-job").label(chrome::label::STOP).disabled(!self.busy).on_click(cx.listener(|this, _, _, cx| this.stop_job(cx)))))
             .child(plain_btn(Button::new("save-session").label(chrome::label::SAVE_PROJECT).on_click(cx.listener(|this, _, _, cx| {
-                this.pull(cx);
-                this.status = "已保存到录音项目.".into();
-                this.mark_dirty(cx);
+                this.save_now(cx);
             }))))
             .child(quiet_btn(Button::new("open-saved").label(chrome::label::OPEN_SAVED).on_click(cx.listener(|this, _, _, cx| {
                 this.overlay = None;

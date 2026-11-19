@@ -231,6 +231,9 @@ pub struct Studio {
     busy: bool,
     ready: bool,
     save_scheduled: bool,
+    dirty: bool,
+    clean_workspace: Workspace,
+    exit_ask: bool,
     limiter_on: bool,
     status: SharedString,
     error: Option<SharedString>,
@@ -467,6 +470,7 @@ impl Studio {
         } else {
             "未找到裁剪版 FFmpeg. 请把 ffmpeg 与 ffprobe 放在程序同目录."
         };
+        let clean_workspace = workspace.clone();
         let mut studio = Self {
             workspace,
             llm,
@@ -530,6 +534,9 @@ impl Studio {
             busy: false,
             ready: false,
             save_scheduled: false,
+            dirty: false,
+            clean_workspace,
+            exit_ask: false,
             limiter_on: false,
             status: status.into(),
             error: None,
@@ -632,6 +639,21 @@ impl Studio {
         };
         studio.push(window, cx);
         studio.ready = true;
+        let view = cx.entity().downgrade();
+        studio._subscriptions.push(window.on_window_should_close(cx, move |_window, app| {
+            let Some(view) = view.upgrade() else {
+                return true;
+            };
+            if !chrome::veto_close(view.read(app).dirty) {
+                return true;
+            }
+            view.update(app, |studio, cx| {
+                studio.pull(cx);
+                studio.exit_ask = true;
+                cx.notify();
+            });
+            false
+        }));
         studio
     }
 
@@ -650,6 +672,7 @@ impl Studio {
     }
 
     fn mark_dirty(&mut self, cx: &mut Context<Self>) {
+        self.dirty = true;
         self.save_scheduled = true;
         cx.notify();
         self.save_task = Some(cx.spawn(async move |this, cx| {
@@ -660,6 +683,46 @@ impl Studio {
             })
             .ok();
         }));
+    }
+
+    pub(super) fn save_now(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pull(cx);
+        self.save_task = None;
+        if let Err(error) = store::save_workspace(&self.workspace) {
+            self.show_error(error.to_string(), cx);
+            return false;
+        }
+        self.clean_workspace = self.workspace.clone();
+        self.dirty = false;
+        self.save_scheduled = false;
+        self.status = "已保存.".into();
+        cx.notify();
+        true
+    }
+
+    fn exit_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.save_now(cx) {
+            self.exit_ask = false;
+            window.remove_window();
+        }
+    }
+
+    fn exit_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_task = None;
+        self.workspace = self.clean_workspace.clone();
+        if let Err(error) = store::save_workspace(&self.workspace) {
+            self.show_error(error.to_string(), cx);
+            return;
+        }
+        self.dirty = false;
+        self.save_scheduled = false;
+        self.exit_ask = false;
+        window.remove_window();
+    }
+
+    fn exit_cancel(&mut self, cx: &mut Context<Self>) {
+        self.exit_ask = false;
+        cx.notify();
     }
 
     fn record(&mut self, operation: &str, result: &str, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -986,9 +1049,9 @@ impl Studio {
             },
             chrome::Focus {
                 typing: event.prefer_character_input,
-                dialog: self.overlay.is_some(),
+                dialog: self.overlay.is_some() || self.exit_ask,
                 lookup,
-                preview: self.page == Page::Split && self.overlay.is_none(),
+                preview: self.page == Page::Split && self.overlay.is_none() && !self.exit_ask,
                 composing: event.keystroke.is_ime_in_progress(),
             },
         );
@@ -999,10 +1062,18 @@ impl Studio {
             return;
         }
         match command {
+            chrome::Command::Save => {
+                cx.stop_propagation();
+                self.save_now(cx);
+            }
             chrome::Command::Confirm => self.search_work(cx),
             chrome::Command::Dismiss => {
-                self.overlay = None;
-                cx.notify();
+                if self.exit_ask {
+                    self.exit_cancel(cx);
+                } else {
+                    self.overlay = None;
+                    cx.notify();
+                }
             }
             chrome::Command::PlayPause => self.toggle_preview(cx),
             chrome::Command::SeekBack => self.seek_preview(-chrome::SEEK_SECONDS, cx),
@@ -1754,7 +1825,11 @@ impl Studio {
                 cx.notify();
             })));
         }
+        let save = Button::new("tool-save").xsmall().label(if self.dirty { "保存" } else { "已保存" }).on_click(cx.listener(|this, _, _, cx| {
+            this.save_now(cx);
+        }));
         tools = tools
+            .child(if self.dirty { save.primary() } else { save })
             .child(Button::new("tool-llm").xsmall().ghost().label(chrome::label::LLM).on_click(cx.listener(|this, _, _, cx| {
                 this.overlay = Some(Overlay::Llm);
                 cx.notify();
@@ -1858,6 +1933,34 @@ impl Studio {
                 cx.notify();
             })))
     }
+
+    fn exit_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(0x161226))
+            .child(
+                exit_card()
+                    .child(div().text_size(px(18.)).child("退出前保存"))
+                    .child(div().text_size(px(14.)).text_color(rgb(0x66647a)).child("当前修改还没有保存. 要写入本机工作区后再退出吗?"))
+                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("不保存会回到上次按下保存时的内容. Esc 取消."))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.))
+                            .child(Button::new("exit-save").primary().label("保存并退出").on_click(cx.listener(|this, _, window, cx| this.exit_save(window, cx))))
+                            .child(Button::new("exit-discard").label("不保存退出").on_click(cx.listener(|this, _, window, cx| this.exit_discard(window, cx))))
+                            .child(Button::new("exit-cancel").ghost().label("取消").on_click(cx.listener(|this, _, _, cx| this.exit_cancel(cx)))),
+                    ),
+            )
+    }
 }
 
 impl Render for Studio {
@@ -1948,6 +2051,7 @@ impl Render for Studio {
             }
         };
         div()
+            .relative()
             .flex()
             .flex_row()
             .size_full()
@@ -1987,7 +2091,12 @@ impl Render for Studio {
                     )
                     .child(footer),
             )
+            .children(self.exit_ask.then(|| self.exit_prompt(cx)))
     }
+}
+
+fn exit_card() -> gpui_kit::Div {
+    div().w(px(440.)).bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.)).p(px(22.)).flex().flex_col().gap(px(12.))
 }
 
 fn vertical_scrollbar(scroll: gpui_kit::ScrollHandle, grab: std::rc::Rc<std::cell::Cell<Option<f32>>>) -> impl IntoElement {

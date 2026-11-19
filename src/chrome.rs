@@ -287,6 +287,7 @@ pub enum Command {
     SelectAll,
     Undo,
     Redo,
+    Save,
 }
 
 pub fn resolve(key: &str, mods: Mods, focus: Focus) -> Option<Command> {
@@ -303,8 +304,12 @@ pub fn resolve(key: &str, mods: Mods, focus: Focus) -> Option<Command> {
             ("z", false) => Some(Command::Undo),
             ("z", true) => Some(Command::Redo),
             ("y", false) => Some(Command::Redo),
+            ("s", false) => Some(Command::Save),
             _ => None,
         };
+    }
+    if mods.primary && !mods.alt && !mods.shift && !mods.function && key == "s" {
+        return Some(Command::Save);
     }
     if mods.primary || mods.alt || mods.shift || mods.function {
         return None;
@@ -321,6 +326,10 @@ pub fn resolve(key: &str, mods: Mods, focus: Focus) -> Option<Command> {
 
 pub fn keeps_text_editing(command: Command) -> bool {
     matches!(command, Command::Copy | Command::Cut | Command::Paste | Command::SelectAll | Command::Undo | Command::Redo)
+}
+
+pub fn veto_close(dirty: bool) -> bool {
+    dirty
 }
 
 pub fn nudge_playhead(current: f64, delta: f64) -> f64 {
@@ -526,6 +535,11 @@ mod tests {
         assert_eq!(press("escape", Focus::typing()), None);
         assert_eq!(press("escape", Focus::preview()), None);
         assert_eq!(press("escape", Focus::lookup()), Some(Command::Dismiss));
+        assert_eq!(chord("s", true, false, false, false, Focus::page()), Some(Command::Save));
+        assert_eq!(chord("s", true, false, false, false, Focus::typing()), Some(Command::Save));
+        assert!(!keeps_text_editing(Command::Save));
+        assert!(veto_close(true));
+        assert!(!veto_close(false));
     }
 
     #[test]
