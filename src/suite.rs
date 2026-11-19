@@ -284,6 +284,37 @@ fn titles_and_movement_groups_follow_the_work_not_the_movement() {
     assert_eq!(teens.len(), 1);
     assert_eq!(teens[0].indexes, vec![0, 1]);
     assert_eq!(teens[0].title, "组曲");
+
+    let impromptus = titled(&[
+        "Impromptu in C minor, D. 899 No. 1",
+        "Impromptu in E-flat major, D. 899 No. 2",
+        "Impromptu in G-flat major, D. 899 No. 3",
+        "Impromptu in A-flat major, D. 899 No. 4",
+    ]);
+    let groups = names::suggest_movement_groups(&impromptus);
+    assert_eq!(groups.len(), 1, "{groups:?}");
+    assert_eq!(groups[0].indexes, vec![0, 1, 2, 3]);
+    assert!(groups[0].title.to_ascii_lowercase().contains("impromptu"), "{}", groups[0].title);
+
+    let chinese = titled(&["舒伯特即兴曲 D.899 第1首", "舒伯特即兴曲 D.899 第2首", "舒伯特即兴曲 D.899 第3首", "舒伯特即兴曲 D.899 第4首"]);
+    let groups = names::suggest_movement_groups(&chinese);
+    assert_eq!(groups.len(), 1, "{groups:?}");
+    assert_eq!(groups[0].indexes, vec![0, 1, 2, 3]);
+
+    let sonatas = titled(&[
+        "Piano Sonata No. 1 in F minor, Op. 2 No. 1",
+        "Piano Sonata No. 2 in A major, Op. 2 No. 2",
+        "Piano Sonata No. 3 in C major, Op. 2 No. 3",
+    ]);
+    assert!(names::suggest_movement_groups(&sonatas).is_empty(), "三首独立奏鸣曲不能因为同属 Op. 2 被合并");
+
+    let named = titled(&["贝多芬钢奏 Op.2 第1首", "贝多芬钢奏 Op.2 第2首", "贝多芬钢奏 Op.2 第3首"]);
+    assert!(names::suggest_movement_groups(&named).is_empty());
+
+    let one = titled(&["Piano Sonata No. 1, Op. 2 No. 1: I. Allegro", "Piano Sonata No. 1, Op. 2 No. 1: II. Adagio", "Piano Sonata No. 1, Op. 2 No. 1: III. Prestissimo"]);
+    let groups = names::suggest_movement_groups(&one);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].indexes, vec![0, 1, 2]);
 }
 
 #[test]
