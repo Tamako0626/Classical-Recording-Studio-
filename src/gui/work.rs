@@ -4261,7 +4261,7 @@ fn program_from_rows(rows: &[AiRow]) -> program::ImportedProgram {
     imported
 }
 
-fn layout_index(value: &str) -> Option<usize> {
+fn layout_index(value: &str) -> Option<u8> {
     match value.trim().to_ascii_lowercase().as_str() {
         "ivory" | "0" | "象牙白" => Some(0),
         "dark" | "1" | "深色" => Some(1),
