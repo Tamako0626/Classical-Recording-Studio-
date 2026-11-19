@@ -84,10 +84,11 @@ enum JobMsg {
     English(Result<Vec<EnglishSuggestion>, String>),
     Works(Result<Vec<WorkHit>, String>),
     Play(Result<PlayedClip, String>),
-    Import { cd: bool, include_tracks: bool, text: String },
+    Import { cd: bool, include_tracks: bool, text: String, task: String, request: String, images: Vec<std::path::PathBuf> },
     Sessions(Result<Vec<SessionCandidate>, String>),
     Names(Result<Vec<NameHit>, String>),
     Parts(Result<String, String>),
+    Groups(Result<Vec<crate::llm::MergeSuggestion>, String>),
     Models(Result<Vec<String>, String>),
     Exported { note: String, reports: Vec<crate::export::TrackReport> },
     Compare { raw: std::path::PathBuf, wet: std::path::PathBuf, note: String },
@@ -95,6 +96,76 @@ enum JobMsg {
     CoverPhoto(String),
     Artwork { back: bool, path: String, name: String },
     CoverDesign(crate::coverart::CoverDesign),
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum AiKind {
+    Facts { include_tracks: bool, cd: bool },
+    Names,
+    Movements,
+    Groups,
+    English,
+    Cover,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AiLine {
+    pub key: String,
+    pub label: String,
+    pub on: bool,
+    pub value: String,
+    pub extra: String,
+    pub show_extra: bool,
+    pub start: String,
+    pub end: String,
+    pub indexes: Vec<usize>,
+}
+
+impl AiLine {
+    pub(super) fn field(key: &str, label: &str, value: &str) -> Self {
+        Self { key: key.into(), label: label.into(), on: true, value: value.into(), extra: String::new(), show_extra: false, start: String::new(), end: String::new(), indexes: Vec::new() }
+    }
+
+    pub(super) fn pair(key: &str, label: &str, value: &str, extra: &str) -> Self {
+        Self { key: key.into(), label: label.into(), on: true, value: value.into(), extra: extra.into(), show_extra: true, start: String::new(), end: String::new(), indexes: Vec::new() }
+    }
+
+    pub(super) fn track(index: usize, title: &str, composer: &str, start: &str, end: &str) -> Self {
+        Self { key: format!("track-{index}"), label: format!("曲目 {}", index + 1), on: true, value: title.into(), extra: composer.into(), show_extra: true, start: start.into(), end: end.into(), indexes: Vec::new() }
+    }
+
+    pub(super) fn group(label: &str, title: &str, indexes: Vec<usize>) -> Self {
+        Self { key: "group".into(), label: label.into(), on: true, value: title.into(), extra: String::new(), show_extra: false, start: String::new(), end: String::new(), indexes }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AiDraft {
+    pub title: String,
+    pub kind: AiKind,
+    pub lines: Vec<AiLine>,
+    pub retry_task: String,
+    pub retry_text: String,
+    pub retry_images: Vec<std::path::PathBuf>,
+}
+
+struct AiField {
+    key: String,
+    label: String,
+    on: bool,
+    value: Entity<InputState>,
+    extra: Entity<InputState>,
+    show_extra: bool,
+    start: String,
+    end: String,
+    indexes: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct AiRetry {
+    task: String,
+    text: String,
+    images: Vec<std::path::PathBuf>,
 }
 
 pub struct Studio {
@@ -137,6 +208,12 @@ pub struct Studio {
     pending_tracks: bool,
     pending_cd: bool,
     pending_parts: String,
+    ai_draft: Option<AiDraft>,
+    ai_fields: Vec<AiField>,
+    ai_gen: u64,
+    ai_field_gen: u64,
+    ai_note: Entity<InputState>,
+    ai_retry: Option<AiRetry>,
     stitch_on: bool,
     stitch_paths: Vec<std::path::PathBuf>,
     stitch_slices: Vec<crate::names::StitchSlice>,
@@ -313,6 +390,7 @@ impl Studio {
         let cd_row_file = input("文件名, 不含扩展名", cx);
         let mb_query = input("曲名, 作品号", cx);
         let movements = input("I. Allegro | II. Adagio | III. Rondo", cx);
+        let ai_note = input("写下要改的地方, 再打回重新识别", cx);
         let cover_title = input("专辑标题", cx);
         let cover_performer = input("演出者", cx);
         let cover_detail = input("音乐厅, 城市与日期", cx);
@@ -429,6 +507,12 @@ impl Studio {
             pending_tracks: false,
             pending_cd: false,
             pending_parts: String::new(),
+            ai_draft: None,
+            ai_fields: Vec::new(),
+            ai_gen: 0,
+            ai_field_gen: 0,
+            ai_note,
+            ai_retry: None,
             stitch_on: false,
             stitch_paths: Vec::new(),
             stitch_slices: Vec::new(),
@@ -788,7 +872,7 @@ impl Studio {
             },
             JobMsg::English(Ok(items)) => {
                 self.review = items;
-                self.status = "请核对英文建议, 再应用选中项.".into();
+                self.stage_english(cx);
             }
             JobMsg::English(Err(text)) => self.show_error(text, cx),
             JobMsg::Works(Ok(items)) => {
@@ -799,21 +883,12 @@ impl Studio {
                 self.status = format!("MusicBrainz 返回 {} 条.", self.mb_hits.len()).into();
             }
             JobMsg::Works(Err(text)) => self.show_error(text, cx),
-            JobMsg::Import { cd, include_tracks, text } => {
-                let imported = crate::program::parse_program(&text);
-                let fields = [&imported.name, &imported.date, &imported.performer, &imported.conductor, &imported.composer, &imported.orchestra, &imported.city, &imported.venue, &imported.origin].iter().filter(|item| item.as_ref().is_some_and(|value| !value.trim().is_empty())).count();
-                if fields == 0 && imported.tracks.is_empty() {
-                    self.show_error("模型没有识别到场次或曲目.", cx);
-                } else {
-                    self.pending_import = Some(imported);
-                    self.pending_tracks = include_tracks;
-                    self.pending_cd = cd;
-                    self.status = format!("模型识别到 {fields} 项信息和 {} 条曲目. 请核对后填入.", self.pending_import.as_ref().map(|item| item.tracks.len()).unwrap_or(0)).into();
-                }
+            JobMsg::Import { cd, include_tracks, text, task, request, images } => {
+                self.stage_import(cd, include_tracks, &text, &task, &request, images, cx);
             }
             JobMsg::Sessions(Ok(items)) => {
                 self.session_hits = items;
-                self.status = if self.session_hits.is_empty() { "没有找到有来源的场次.".into() } else { format!("找到 {} 个场次候选. 请核对后来源.", self.session_hits.len()).into() };
+                self.status = if self.session_hits.is_empty() { "没有找到有来源的场次.".into() } else { format!("找到 {} 个场次候选. 点「核对这项」后可以修改再填入.", self.session_hits.len()).into() };
             }
             JobMsg::Sessions(Err(text)) => self.show_error(text, cx),
             JobMsg::Names(Ok(items)) => {
@@ -821,7 +896,7 @@ impl Studio {
                 if self.name_open {
                     self.rebuild_name_choices();
                 }
-                self.status = if self.name_hits.is_empty() { "模型没有给出足够明确的曲名.".into() } else { "请选择一条文件名. 勾选后可同时更新标签.".into() };
+                self.stage_names();
             }
             JobMsg::Names(Err(text)) => self.show_error(text, cx),
             JobMsg::Parts(Ok(text)) => {
@@ -829,7 +904,7 @@ impl Studio {
                 self.movement_on = vec![true; self.movement_parts.len()];
                 self.pending_parts = text;
                 self.movement_open = true;
-                self.status = "模型给出了乐章, 勾选后填入当前曲目.".into();
+                self.stage_parts();
             }
             JobMsg::Parts(Err(text)) => self.show_error(text, cx),
             JobMsg::Models(Ok(names)) => {
@@ -892,17 +967,9 @@ impl Studio {
                 self.status = "封面已准备.".into();
                 self.mark_dirty(cx);
             }
-            JobMsg::CoverDesign(design) => {
-                let current = (text(&self.cover_title, cx), text(&self.cover_performer, cx), text(&self.cover_detail, cx), self.cover_layout);
-                self.cover_undo = Some(current);
-                self.cover_layout = match design.layout {
-                    crate::coverart::Layout::Ivory => 0,
-                    crate::coverart::Layout::Dark => 1,
-                    crate::coverart::Layout::Photo => 2,
-                };
-                self.cover_pending = Some(design);
-                self.status = "AI 方案已填入, 可继续编辑文字和排版.".into();
-            }
+            JobMsg::Groups(Ok(groups)) => self.stage_groups(groups),
+            JobMsg::Groups(Err(text)) => self.show_error(text, cx),
+            JobMsg::CoverDesign(design) => self.stage_cover(design),
         }
         cx.notify();
     }
@@ -1867,6 +1934,7 @@ impl Render for Studio {
             set_text(&self.cover_performer, &design.performer, window, cx);
             set_text(&self.cover_detail, &design.detail, window, cx);
         }
+        self.ensure_ai_fields(window, cx);
         let overlay = self.overlay;
         let page = if let Some(overlay) = overlay {
             self.overlay_page(overlay, cx)
@@ -1913,7 +1981,7 @@ impl Render for Studio {
                                     .track_scroll(&self.page_scroll)
                                     .px(px(30.))
                                     .py(px(24.))
-                                    .child(div().w_full().max_w(px(1540.)).child(page)),
+                                    .child(div().w_full().max_w(px(1540.)).flex().flex_col().gap(px(16.)).child(page).child(self.ai_panel(cx))),
                             )
                             .child(vertical_scrollbar(self.page_scroll.clone(), self.page_scroll_grab.clone())),
                     )

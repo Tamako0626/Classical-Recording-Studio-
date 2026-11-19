@@ -591,7 +591,16 @@ impl Studio {
         if self.movement_open {
             body = body.child(self.movement_panel(cx));
         }
-        body.child(div().px(px(19.)).pb(px(16.)).child(group_block(project, cx)))
+        body.child(
+            div()
+                .px(px(19.))
+                .pb(px(16.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(group_block(project, cx))
+                .child(plain_btn(Button::new("model-groups").label("用模型建议合并").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_groups(cx))))),
+        )
     }
 
     fn source_picker(&self, project: &Project, prefix: &str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -769,7 +778,6 @@ impl Studio {
                     .child(Button::new("cd-cue").small().label("为当前碟指定 CUE").on_click(cx.listener(|this, _, window, cx| this.assign_cue(window, cx))))
                     .child(Button::new("cd-audio").small().label("为当前碟添加音频").on_click(cx.listener(|this, _, window, cx| this.add_disc_audio(window, cx))))
                     .child(Button::new("cd-model").small().label("用模型识别封面与封底").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_cd(cx))))
-                    .child(Button::new("cd-apply-model").small().label("填入模型识别").disabled(self.pending_import.is_none() || !self.pending_cd).on_click(cx.listener(|this, _, window, cx| this.apply_pending(window, cx)))),
             )
             .child(
                 div()
@@ -957,24 +965,11 @@ impl Studio {
     }
 
     pub(super) fn llm_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut review = div().flex().flex_col().gap_2();
-        for (index, item) in self.review.iter().enumerate() {
-            let label = format!("{}: {} -> {}", item.label, item.before, item.after);
-            review = review.child(
-                Checkbox::new(SharedString::from(format!("review-{index}")))
-                    .label(label)
-                    .checked(item.apply)
-                    .on_change(cx.listener(move |this, value, _, cx| {
-                        if let Some(item) = this.review.get_mut(index) {
-                            item.apply = *value;
-                        }
-                        cx.notify();
-                    })),
-            );
-            if !item.note.is_empty() {
-                review = review.child(Label::new(item.note.clone()));
-            }
-        }
+        let review = if self.review.is_empty() {
+            div().flex().flex_col()
+        } else {
+            div().flex().flex_col().gap_2().child(Label::new("英文建议在页面下方. 勾选要改的项, 可以直接改字, 也可以写意见后重新识别."))
+        };
         super::surface()
             .child(Label::new("API Key 只保存在本机, 不写入项目文件. 图片识别要勾选图像输入. 联网核对使用 DeepSeek 官方接口和 deepseek-flash."))
             .child(Form::new().child(super::field("接口", &self.llm_base)).child(super::field("模型", &self.llm_model)).child(Field::new().label("API Key").child(Input::new(&self.llm_key).small().content_type(gpui_kit::component::input::InputContentType::Password).mask_toggle())))
@@ -1000,7 +995,7 @@ impl Studio {
                     .child(Button::new("list-models").label("读取模型").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.list_models(cx))))
                     .child(Button::new("test-llm").label("检查连接").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.test_llm(cx))))
                     .child(Button::new("english").primary().label("生成英文场次").loading(self.busy).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))
-                    .child(Button::new("apply-english").label("应用选中项").on_click(cx.listener(|this, _, window, cx| this.apply_english(window, cx)))),
+                    .child(Button::new("apply-english").label("填入下方勾选").on_click(cx.listener(|this, _, window, cx| this.apply_ai(window, cx)))),
             )
             .child(review)
             .into_any_element()
@@ -1965,9 +1960,6 @@ impl Studio {
             let count = self.intake_files.len();
             row = row.child(primary_btn(Button::new("recognize-images").label("用模型识别").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_intake(cx))))).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(format!("已选择 {count} 张图片")));
         }
-        if self.pending_import.is_some() && !self.pending_cd {
-            row = row.child(plain_btn(Button::new("apply-import").label("填入识别结果").on_click(cx.listener(|this, _, window, cx| this.apply_pending(window, cx)))));
-        }
         column = column.child(row);
         for (index, hit) in self.session_hits.iter().enumerate() {
             let title = [hit.name.as_str(), hit.performer.as_str(), hit.date.as_str(), hit.venue.as_str()].into_iter().filter(|item| !item.is_empty()).collect::<Vec<_>>().join(" · ");
@@ -1978,13 +1970,13 @@ impl Studio {
                     .flex_row()
                     .gap(px(8.))
                     .items_center()
-                    .child(plain_btn(Button::new(SharedString::from(format!("use-session-{index}"))).label("使用此场次").on_click(cx.listener(move |this, _, window, cx| this.apply_session(index, window, cx)))))
+                    .child(plain_btn(Button::new(SharedString::from(format!("use-session-{index}"))).label("核对这项").on_click(cx.listener(move |this, _, _, cx| this.hold_session(index, cx)))))
                     .child(div().text_size(px(12.)).child(format!("{title}  {sources}"))),
             );
         }
         for (index, hit) in self.name_hits.iter().enumerate() {
             let label = if hit.composer.is_empty() { hit.title.clone() } else { format!("{} - {}", hit.composer, hit.title) };
-            column = column.child(plain_btn(Button::new(SharedString::from(format!("use-name-{index}"))).label(format!("采用 {label}")).on_click(cx.listener(move |this, _, window, cx| this.apply_name(index, window, cx)))));
+            column = column.child(plain_btn(Button::new(SharedString::from(format!("use-name-{index}"))).label(format!("核对 {label}")).on_click(cx.listener(move |this, _, _, cx| this.hold_name(index, cx)))));
         }
         column
     }
@@ -1998,7 +1990,7 @@ impl Studio {
         });
     }
 
-    fn import_chosen_program(&mut self, session_only: bool, files: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn import_chosen_program(&mut self, session_only: bool, files: Vec<std::path::PathBuf>, _window: &mut Window, cx: &mut Context<Self>) {
         let text = files.iter().filter(|path| text_file(path)).cloned().collect::<Vec<_>>();
         let images = files.iter().filter(|path| !text_file(path)).cloned().collect::<Vec<_>>();
         if !text.is_empty() && !images.is_empty() || text.len() > 1 {
@@ -2015,23 +2007,14 @@ impl Studio {
             };
             self.intake_files.clear();
             let parsed = program::parse_program(&program::decode_text(&bytes));
-            let (fields, tracks) = {
-                let Some(project) = self.project_mut() else {
-                    return;
-                };
-                program::apply_program(project, &parsed, !session_only)
-            };
-            if fields == 0 && tracks == 0 {
+            let lines = lines_from_program(&parsed, !session_only);
+            if lines.is_empty() {
                 self.show_error("没有识别到场次或曲目. 用「演奏家: 姓名」这样的行, 曲目用「1. 曲名」.", cx);
                 return;
             }
-            if tracks > 0 {
-                self.track_index = Some(0);
-                self.track_picks.clear();
-            }
-            self.push(window, cx);
-            self.mark_dirty(cx);
-            self.status = if tracks > 0 { format!("已填写 {fields} 项场次信息, 导入 {tracks} 条曲目.").into() } else { format!("已填写 {fields} 项场次信息.").into() };
+            self.stage_review(if session_only { "场次文本" } else { "节目单文本" }, super::AiKind::Facts { include_tracks: !session_only, cd: false }, lines, "", "", Vec::new());
+            self.status = "文本已读出. 请在下方勾选, 修改后再填入.".into();
+            cx.notify();
             return;
         }
         if images.len() > 8 {
@@ -2052,9 +2035,13 @@ impl Studio {
             return;
         }
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
-        self.spawn_job(cx, move || match llm::recognize(&config, if session { "session" } else { "program" }, "", &files) {
-            Ok(text) => JobMsg::Import { cd: false, include_tracks: !session, text },
-            Err(error) => JobMsg::Done { operation: "模型识别", result: Err(error.to_string()) },
+        let task = if session { "session" } else { "program" };
+        self.spawn_job(cx, move || {
+            let outcome = llm::recognize(&config, task, "", &files);
+            match outcome {
+                Ok(text) => JobMsg::Import { cd: false, include_tracks: !session, text, task: task.into(), request: String::new(), images: files },
+                Err(error) => JobMsg::Done { operation: "模型识别", result: Err(error.to_string()) },
+            }
         });
     }
 
@@ -2074,6 +2061,7 @@ impl Studio {
             "city": project.city,
             "venue": project.venue
         });
+        self.ai_retry = Some(super::AiRetry { task: "search".into(), text: clues.to_string(), images: Vec::new() });
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         self.spawn_job(cx, move || match llm::search_session(&config, &clues) {
             Ok(items) => JobMsg::Sessions(Ok(items)),
@@ -2081,52 +2069,18 @@ impl Studio {
         });
     }
 
-    fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(imported) = self.pending_import.clone() else {
-            return;
-        };
-        if self.pending_cd {
-            self.fill_cd_import(&imported, window, cx);
-        } else {
-            self.pull(cx);
-            let include = self.pending_tracks;
-            let (fields, tracks) = {
-                let Some(project) = self.project_mut() else { return };
-                program::apply_program(project, &imported, include)
-            };
-            if tracks > 0 {
-                self.track_index = Some(0);
-                self.track_picks.clear();
-            }
-            self.push(window, cx);
-            self.mark_dirty(cx);
-            self.status = format!("已填入 {fields} 项信息和 {tracks} 条曲目.").into();
-        }
-        self.pending_import = None;
-        self.pending_cd = false;
-        cx.notify();
-    }
-
     fn fill_cd_import(&mut self, imported: &program::ImportedProgram, window: &mut Window, cx: &mut Context<Self>) {
-        if text(&self.cd_title, cx).trim().is_empty() {
-            if let Some(value) = imported.name.as_deref() {
-                set_text(&self.cd_title, value, window, cx);
-            }
+        if let Some(value) = imported.name.as_deref() {
+            set_text(&self.cd_title, value, window, cx);
         }
-        if text(&self.cd_artist, cx).trim().is_empty() {
-            if let Some(value) = imported.performer.as_deref() {
-                set_text(&self.cd_artist, value, window, cx);
-            }
+        if let Some(value) = imported.performer.as_deref() {
+            set_text(&self.cd_artist, value, window, cx);
         }
-        if text(&self.cd_composer, cx).trim().is_empty() {
-            if let Some(value) = imported.composer.as_deref() {
-                set_text(&self.cd_composer, value, window, cx);
-            }
+        if let Some(value) = imported.composer.as_deref() {
+            set_text(&self.cd_composer, value, window, cx);
         }
-        if text(&self.cd_date, cx).trim().is_empty() {
-            if let Some(value) = imported.date.as_deref() {
-                set_text(&self.cd_date, value, window, cx);
-            }
+        if let Some(value) = imported.date.as_deref() {
+            set_text(&self.cd_date, value, window, cx);
         }
         if !imported.tracks.is_empty() {
             let album_artist = imported.performer.clone().unwrap_or_default();
@@ -2165,29 +2119,7 @@ impl Studio {
             }
             self.load_disc(window, cx);
         }
-        self.status = "已把模型识别填入 CD 页. 请再核对轨号.".into();
-    }
-
-    fn apply_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(hit) = self.session_hits.get(index).cloned() else { return };
-        self.pull(cx);
-        let Some(project) = self.project_mut() else { return };
-        let write = |slot: &mut String, value: &str| {
-            if !value.trim().is_empty() {
-                *slot = value.trim().to_string();
-            }
-        };
-        write(&mut project.name, &hit.name);
-        write(&mut project.performer, &hit.performer);
-        write(&mut project.conductor, &hit.conductor);
-        write(&mut project.orchestra, &hit.orchestra);
-        write(&mut project.composer, &hit.composer);
-        write(&mut project.date, &hit.date);
-        write(&mut project.city, &hit.city);
-        write(&mut project.venue, &hit.venue);
-        self.push(window, cx);
-        self.mark_dirty(cx);
-        self.status = "已填入核对过的场次. 来源仍显示在下方.".into();
+        self.status = "已把勾选的内容填入 CD 页. 请再核对轨号.".into();
     }
 
     fn model_filename(&mut self, cx: &mut Context<Self>) {
@@ -2201,6 +2133,7 @@ impl Studio {
             return;
         }
         let request = serde_json::json!({"title": track.tags.title, "composer": track.tags.composer}).to_string();
+        self.ai_retry = Some(super::AiRetry { task: "filenames".into(), text: request.clone(), images: Vec::new() });
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         self.spawn_job(cx, move || match llm::recognize(&config, "filenames", &request, &[]) {
             Ok(text) => match llm::parse_name_hits(&text) {
@@ -2211,37 +2144,6 @@ impl Studio {
         });
     }
 
-    fn apply_name(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(hit) = self.name_hits.get(index).cloned() else { return };
-        self.pull(cx);
-        let Some(track_index) = self.track_index else { return };
-        {
-            let Some(project) = self.project_mut() else { return };
-            let Some(track) = project.tracks.get_mut(track_index) else { return };
-            track.tags.title = hit.title;
-            if track.tags.composer.trim().is_empty() && !hit.composer.is_empty() {
-                track.tags.composer = hit.composer;
-            }
-        }
-        let filename = {
-            let Some(project) = self.project() else { return };
-            let rule = names::effective_naming(project);
-            let tags = names::track_tags(project, &project.tracks[track_index], track_index);
-            let mut scratch = project.tracks[track_index].clone();
-            scratch.filename.clear();
-            names::filename_for(&rule, &scratch, &tags, track_index)
-        };
-        if let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(track_index)) {
-            if !filename.is_empty() {
-                track.filename = filename;
-            }
-        }
-        self.name_hits.clear();
-        self.push_track(window, cx);
-        self.mark_dirty(cx);
-        self.status = "已采用模型曲名.".into();
-    }
-
     fn model_movements(&mut self, cx: &mut Context<Self>) {
         self.pull(cx);
         let Some(track) = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index))).cloned() else {
@@ -2250,6 +2152,7 @@ impl Studio {
         };
         let composer = self.project().map(|project| if track.tags.composer.trim().is_empty() { project.composer.clone() } else { track.tags.composer.clone() }).unwrap_or_default();
         let request = serde_json::json!({"title": track.tags.title, "composer": composer}).to_string();
+        self.ai_retry = Some(super::AiRetry { task: "movements".into(), text: request.clone(), images: Vec::new() });
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         self.spawn_job(cx, move || match llm::recognize(&config, "movements", &request, &[]) {
             Ok(text) => match llm::parse_movements(&text) {
@@ -2271,9 +2174,12 @@ impl Studio {
             return;
         }
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
-        self.spawn_job(cx, move || match llm::recognize(&config, "cd", "", &files) {
-            Ok(text) => JobMsg::Import { cd: true, include_tracks: true, text },
-            Err(error) => JobMsg::Done { operation: "模型识别封面", result: Err(error.to_string()) },
+        self.spawn_job(cx, move || {
+            let outcome = llm::recognize(&config, "cd", "", &files);
+            match outcome {
+                Ok(text) => JobMsg::Import { cd: true, include_tracks: true, text, task: "cd".into(), request: String::new(), images: files },
+                Err(error) => JobMsg::Done { operation: "模型识别封面", result: Err(error.to_string()) },
+            }
         });
     }
 
@@ -2345,6 +2251,10 @@ impl Studio {
     }
 
     fn apply_movements(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !manual && matches!(self.ai_draft.as_ref().map(|item| &item.kind), Some(super::AiKind::Movements)) {
+            self.apply_ai(window, cx);
+            return;
+        }
         self.pull(cx);
         let checked = self.movement_parts.iter().zip(self.movement_on.iter()).filter(|(_, on)| **on).map(|(title, _)| title.clone()).collect::<Vec<_>>();
         let titles = if manual || checked.is_empty() { program::movement_titles(&text(&self.movements, cx)) } else { checked };
@@ -2931,6 +2841,7 @@ impl Studio {
             self.show_error("请先建立项目.", cx);
             return;
         };
+        self.ai_retry = Some(super::AiRetry { task: "english".into(), text: String::new(), images: Vec::new() });
         self.overlay = Some(super::Overlay::Llm);
         self.spawn_job(cx, move || match llm::suggest_english(&config, &project) {
             Ok(items) => JobMsg::English(Ok(items)),
@@ -3376,6 +3287,10 @@ impl Studio {
 
     fn choose_name(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(choice) = self.name_choices.get(index).cloned() else { return };
+        if choice.source.contains("模型") {
+            self.hold_name_text(&choice.title, &choice.composer, cx);
+            return;
+        }
         self.pull(cx);
         let Some(track_index) = self.track_index else { return };
         let update_tags = self.name_update_tags;
@@ -3449,8 +3364,10 @@ impl Studio {
             for (key, value) in &info.tags {
                 lines.push(format!("{key}: {value}"));
             }
-            match llm::recognize(&config, "tags", &lines.join("\n"), &[]) {
-                Ok(text) => JobMsg::Import { cd: false, include_tracks: true, text },
+            let request = lines.join("\n");
+            let outcome = llm::recognize(&config, "tags", &request, &[]);
+            match outcome {
+                Ok(text) => JobMsg::Import { cd: false, include_tracks: true, text, task: "tags".into(), request, images: Vec::new() },
                 Err(error) => JobMsg::Done { operation: "识别录音标签", result: Err(error.to_string()) },
             }
         });
@@ -3546,6 +3463,7 @@ impl Studio {
             "layouts": ["ivory", "dark", "photo"]
         })
         .to_string();
+        self.ai_retry = Some(super::AiRetry { task: "cover".into(), text: request.clone(), images: Vec::new() });
         let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
         self.spawn_job(cx, move || match llm::recognize(&config, "cover", &request, &[]) {
             Ok(text) => match crate::coverart::parse_design(&text) {
@@ -3745,17 +3663,610 @@ impl Studio {
         });
     }
 
-    fn apply_english(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let chosen = self.review.iter().filter(|item| item.apply && !item.after.trim().is_empty()).map(|item| (item.key.clone(), item.after.clone())).collect::<Vec<_>>();
-        let Some(project) = self.project_mut() else {
+    pub(super) fn stage_import(&mut self, cd: bool, include_tracks: bool, raw: &str, task: &str, request: &str, images: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let imported = program::parse_program(raw);
+        let lines = lines_from_program(&imported, include_tracks || cd);
+        if lines.is_empty() {
+            self.show_error("模型没有识别到场次或曲目.", cx);
+            return;
+        }
+        self.pending_import = Some(imported);
+        self.pending_tracks = include_tracks;
+        self.pending_cd = cd;
+        let title = if cd { "CD 识别" } else if include_tracks { "识别结果" } else { "场次识别" };
+        self.stage_review(title, super::AiKind::Facts { include_tracks: include_tracks || cd, cd }, lines, task, request, images);
+        self.status = "模型已返回. 请在页面下方勾选要填入的项, 可以修改, 也可以写意见后重新识别.".into();
+    }
+
+    pub(super) fn stage_names(&mut self) {
+        if self.name_hits.is_empty() {
+            self.status = "模型没有给出足够明确的曲名.".into();
+            return;
+        }
+        let lines = self.name_hits.iter().map(|hit| super::AiLine::pair("name", "曲名建议", &hit.title, &hit.composer)).collect();
+        let (task, text, images) = self.current_retry("filenames");
+        self.stage_review("文件名建议", super::AiKind::Names, lines, &task, &text, images);
+        self.status = "曲名建议在页面下方. 勾选一条, 修改后再填入当前曲目.".into();
+    }
+
+    pub(super) fn stage_parts(&mut self) {
+        if self.movement_parts.is_empty() {
+            self.status = "模型没有确定乐章顺序.".into();
+            return;
+        }
+        let lines = self.movement_parts.iter().map(|part| super::AiLine::field("part", "乐章", part)).collect();
+        let (task, text, images) = self.current_retry("movements");
+        self.stage_review("乐章建议", super::AiKind::Movements, lines, &task, &text, images);
+        self.status = "乐章在页面下方. 可以改字, 取消勾选, 或写意见后重新识别.".into();
+    }
+
+    pub(super) fn stage_english(&mut self, _cx: &mut Context<Self>) {
+        if self.review.is_empty() {
+            self.status = "没有可改写的场次字段.".into();
+            return;
+        }
+        let lines = self.review.iter().map(|item| {
+            let label = if item.note.is_empty() { format!("{} (现为 {})", item.label, item.before) } else { format!("{} (现为 {}) {}", item.label, item.before, item.note) };
+            let mut line = super::AiLine::field(&item.key, &label, &item.after);
+            line.on = item.apply;
+            line
+        }).collect();
+        let (task, text, images) = self.current_retry("english");
+        self.stage_review("英文建议", super::AiKind::English, lines, &task, &text, images);
+        self.status = "英文建议在页面下方. 勾选并修改后再填入.".into();
+    }
+
+    pub(super) fn stage_groups(&mut self, groups: Vec<llm::MergeSuggestion>) {
+        if groups.is_empty() {
+            self.status = "模型没有给出可合并的组. 同一作品号下的独立作品不会并在一起.".into();
+            return;
+        }
+        let lines = groups.into_iter().map(|group| {
+            let label = format!("第 {} 轨", group.indexes.iter().map(|index| (index + 1).to_string()).collect::<Vec<_>>().join(", "));
+            super::AiLine::group(&label, &group.title, group.indexes)
+        }).collect();
+        let (task, text, images) = self.current_retry("groups");
+        self.stage_review("合并建议", super::AiKind::Groups, lines, &task, &text, images);
+        self.status = "合并建议在页面下方. 勾选并修改标题后再合并, 也可以写意见重新识别.".into();
+    }
+
+    pub(super) fn stage_cover(&mut self, design: crate::coverart::CoverDesign) {
+        let layout = match design.layout {
+            crate::coverart::Layout::Ivory => "ivory",
+            crate::coverart::Layout::Dark => "dark",
+            crate::coverart::Layout::Photo => "photo",
+        };
+        let lines = vec![
+            super::AiLine::field("title", "封面标题", &design.title),
+            super::AiLine::field("performer", "演出者", &design.performer),
+            super::AiLine::field("detail", "音乐厅, 城市与日期", &design.detail),
+            super::AiLine::field("layout", "排版 ivory / dark / photo", layout),
+        ];
+        let (task, text, images) = self.current_retry("cover");
+        self.stage_review("封面文案", super::AiKind::Cover, lines, &task, &text, images);
+        self.status = "封面方案在页面下方. 修改后再填入封面工作室, 不会直接用作专辑封面.".into();
+    }
+
+    fn stage_review(&mut self, title: &str, kind: super::AiKind, lines: Vec<super::AiLine>, task: &str, request: &str, images: Vec<std::path::PathBuf>) {
+        self.ai_draft = Some(super::AiDraft { title: title.into(), kind, lines, retry_task: task.into(), retry_text: request.into(), retry_images: images });
+        self.ai_gen = self.ai_gen.wrapping_add(1);
+    }
+
+    fn current_retry(&self, task: &str) -> (String, String, Vec<std::path::PathBuf>) {
+        self.ai_retry.clone().filter(|item| item.task == task).map(|item| (item.task, item.text, item.images)).unwrap_or_default()
+    }
+
+    fn hold_session(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(hit) = self.session_hits.get(index).cloned() else { return };
+        let mut lines = Vec::new();
+        let mut add = |key: &str, label: &str, value: &str| {
+            if !value.trim().is_empty() {
+                lines.push(super::AiLine::field(key, label, value));
+            }
+        };
+        add("name", "场次 / 专辑名", &hit.name);
+        add("performer", "演奏家", &hit.performer);
+        add("conductor", "指挥", &hit.conductor);
+        add("orchestra", "乐团", &hit.orchestra);
+        add("composer", "作曲家", &hit.composer);
+        add("date", "日期", &hit.date);
+        add("city", "城市", &hit.city);
+        add("venue", "音乐厅", &hit.venue);
+        drop(add);
+        if lines.is_empty() {
+            self.show_error("这条候选没有可填的字段.", cx);
+            return;
+        }
+        let (task, text, images) = self.current_retry("search");
+        let task = if task.is_empty() { "search".to_string() } else { task };
+        self.stage_review("场次核对", super::AiKind::Facts { include_tracks: false, cd: false }, lines, &task, &text, images);
+        self.status = "场次已放入下方核对. 改完再填入, 或写意见后重新核对.".into();
+        cx.notify();
+    }
+
+    fn hold_name(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(hit) = self.name_hits.get(index).cloned() else { return };
+        self.hold_name_text(&hit.title, &hit.composer, cx);
+    }
+
+    fn hold_name_text(&mut self, title: &str, composer: &str, cx: &mut Context<Self>) {
+        if matches!(self.ai_draft.as_ref().map(|item| &item.kind), Some(super::AiKind::Names)) {
+            let picks: Vec<bool> = self.ai_draft.as_ref().map(|draft| draft.lines.iter().map(|line| line.value == title && (composer.is_empty() || line.extra == composer)).collect()).unwrap_or_default();
+            if let Some(draft) = &mut self.ai_draft {
+                for (index, line) in draft.lines.iter_mut().enumerate() {
+                    line.on = picks.get(index).copied().unwrap_or(false);
+                }
+            }
+            for (index, field) in self.ai_fields.iter_mut().enumerate() {
+                field.on = picks.get(index).copied().unwrap_or(false);
+            }
+            self.status = "已勾选这项. 可修改后再填入.".into();
+            cx.notify();
+            return;
+        }
+        let (task, text, images) = self.current_retry("filenames");
+        self.stage_review("文件名建议", super::AiKind::Names, vec![super::AiLine::pair("name", "曲名建议", title, composer)], &task, &text, images);
+        self.status = "已放入下方核对. 修改后再填入, 不会直接改曲目.".into();
+        cx.notify();
+    }
+
+    fn model_groups(&mut self, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(project) = self.project().cloned() else {
+            self.show_error("请先建立项目.", cx);
             return;
         };
-        for (key, value) in &chosen {
-            llm::apply_field(project, key, value);
+        if project.tracks.len() < 2 {
+            self.show_error("至少要有两轨才能建议合并.", cx);
+            return;
         }
-        self.push(window, cx);
-        self.status = format!("已应用 {} 项.", chosen.len()).into();
+        let request = serde_json::json!({
+            "tracks": project.tracks.iter().enumerate().map(|(index, track)| serde_json::json!({"index": index, "title": track.tags.title, "composer": track.tags.composer})).collect::<Vec<_>>()
+        })
+        .to_string();
+        self.ai_retry = Some(super::AiRetry { task: "groups".into(), text: request.clone(), images: Vec::new() });
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        let count = project.tracks.len();
+        let titles: Vec<String> = project.tracks.iter().map(|track| track.tags.title.clone()).collect();
+        self.spawn_job(cx, move || match llm::recognize(&config, "groups", &request, &[]) {
+            Ok(text) => match llm::parse_merge_groups(&text, count) {
+                Ok(groups) => {
+                    let groups = groups.into_iter().filter(|group| {
+                        let names = group.indexes.iter().filter_map(|index| titles.get(*index).map(String::as_str)).collect::<Vec<_>>();
+                        names.len() == group.indexes.len() && names::model_group_allowed(&names)
+                    }).collect();
+                    JobMsg::Groups(Ok(groups))
+                }
+                Err(error) => JobMsg::Groups(Err(error.to_string())),
+            },
+            Err(error) => JobMsg::Groups(Err(error.to_string())),
+        });
+    }
+
+    pub(super) fn ensure_ai_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_field_gen == self.ai_gen {
+            return;
+        }
+        let Some(draft) = self.ai_draft.clone() else {
+            self.ai_fields.clear();
+            self.ai_field_gen = self.ai_gen;
+            return;
+        };
+        self.ai_fields = draft.lines.iter().map(|line| {
+            let value = cx.new(|cx| InputState::new(window, cx).default_value(line.value.clone()));
+            let extra = cx.new(|cx| InputState::new(window, cx).default_value(line.extra.clone()));
+            super::AiField { key: line.key.clone(), label: line.label.clone(), on: line.on, value, extra, show_extra: line.show_extra, start: line.start.clone(), end: line.end.clone(), indexes: line.indexes.clone() }
+        }).collect();
+        self.ai_field_gen = self.ai_gen;
+    }
+
+    pub(super) fn ai_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(draft) = self.ai_draft.as_ref() else {
+            return div().into_any_element();
+        };
+        if self.ai_fields.len() != draft.lines.len() {
+            return div().into_any_element();
+        }
+        let title = draft.title.clone();
+        let can_retry = !draft.retry_task.is_empty();
+        let mut column = div().flex().flex_col().gap(px(8.)).p(px(16.)).bg(rgb(0xffffff)).border_1().border_color(rgb(0xe5e1ed)).rounded(px(14.));
+        column = column.child(div().text_size(px(16.)).child(title)).child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("勾选要填入的项, 可以直接修改. 写意见后可以打回重新识别."));
+        for (index, field) in self.ai_fields.iter().enumerate() {
+            let label = field.label.clone();
+            let on = field.on;
+            let value = field.value.clone();
+            let extra = field.extra.clone();
+            let show_extra = field.show_extra;
+            column = column.child(Checkbox::new(SharedString::from(format!("ai-line-{index}"))).label(label).checked(on).on_change(cx.listener(move |this, value: &bool, _, cx| {
+                if let Some(item) = this.ai_fields.get_mut(index) {
+                    item.on = *value;
+                }
+                if let Some(line) = this.ai_draft.as_mut().and_then(|item| item.lines.get_mut(index)) {
+                    line.on = *value;
+                }
+                cx.notify();
+            })));
+            let mut inputs = div().flex().flex_row().gap(px(8.)).child(div().flex_1().min_w(px(0.)).child(Input::new(&value).small()));
+            if show_extra {
+                inputs = inputs.child(div().w(px(220.)).child(Input::new(&extra).small()));
+            }
+            column = column.child(inputs);
+        }
+        column = column.child(super::field("意见", &self.ai_note)).child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(8.))
+                .child(primary_btn(Button::new("ai-apply").label("填入勾选").on_click(cx.listener(|this, _, window, cx| this.apply_ai(window, cx)))))
+                .child(plain_btn(Button::new("ai-all").label("全选").on_click(cx.listener(|this, _, _, cx| this.set_ai_checks(true, cx)))))
+                .child(plain_btn(Button::new("ai-none").label("清空").on_click(cx.listener(|this, _, _, cx| this.set_ai_checks(false, cx)))))
+                .child(plain_btn(Button::new("ai-retry").label("按意见重新识别").disabled(self.busy || !can_retry).on_click(cx.listener(|this, _, _, cx| this.retry_ai(cx)))))
+                .child(quiet_btn(Button::new("ai-close").label("关闭").on_click(cx.listener(|this, _, _, cx| this.close_ai(cx))))),
+        );
+        column.into_any_element()
+    }
+
+    fn set_ai_checks(&mut self, on: bool, cx: &mut Context<Self>) {
+        for field in &mut self.ai_fields {
+            field.on = on;
+        }
+        if let Some(draft) = &mut self.ai_draft {
+            for line in &mut draft.lines {
+                line.on = on;
+            }
+        }
+        cx.notify();
+    }
+
+    fn close_ai(&mut self, cx: &mut Context<Self>) {
+        self.ai_draft = None;
+        self.ai_gen = self.ai_gen.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn apply_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kind) = self.ai_draft.as_ref().map(|draft| draft.kind.clone()) else {
+            self.show_error("没有待核对的识别结果.", cx);
+            return;
+        };
+        let rows = self.ai_rows(cx);
+        let chosen: Vec<AiRow> = rows.into_iter().filter(|row| row.on).collect();
+        if chosen.is_empty() {
+            self.show_error("请至少勾选一项.", cx);
+            return;
+        }
+        match kind {
+            super::AiKind::Facts { include_tracks, cd } => {
+                let imported = program_from_rows(&chosen);
+                if cd {
+                    self.fill_cd_import(&imported, window, cx);
+                } else {
+                    self.pull(cx);
+                    let (fields, tracks) = {
+                        let Some(project) = self.project_mut() else { return };
+                        program::apply_program(project, &imported, include_tracks)
+                    };
+                    if tracks > 0 {
+                        self.track_index = Some(0);
+                        self.track_picks.clear();
+                    }
+                    self.push(window, cx);
+                    self.mark_dirty(cx);
+                    self.status = format!("已填入 {fields} 项信息和 {tracks} 条曲目.").into();
+                }
+            }
+            super::AiKind::Names => self.apply_name_row(&chosen[0], window, cx),
+            super::AiKind::Movements => self.apply_movement_rows(&chosen, window, cx),
+            super::AiKind::Groups => self.apply_group_rows(&chosen, window, cx),
+            super::AiKind::English => self.apply_english_rows(&chosen, window, cx),
+            super::AiKind::Cover => self.apply_cover_rows(&chosen, window, cx),
+        }
+        cx.notify();
+    }
+
+    fn ai_rows(&self, cx: &gpui_kit::App) -> Vec<AiRow> {
+        self.ai_fields.iter().map(|field| AiRow { key: field.key.clone(), on: field.on, value: text(&field.value, cx), extra: text(&field.extra, cx), start: field.start.clone(), end: field.end.clone(), indexes: field.indexes.clone() }).collect()
+    }
+
+    fn apply_name_row(&mut self, row: &AiRow, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let Some(track_index) = self.track_index else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        let title = row.value.trim().to_string();
+        if title.is_empty() {
+            self.show_error("曲名是空的.", cx);
+            return;
+        }
+        let composer = row.extra.trim().to_string();
+        {
+            let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(track_index)) else { return };
+            track.tags.title = title;
+            if !composer.is_empty() {
+                track.tags.composer = composer;
+            }
+        }
+        let filename = {
+            let Some(project) = self.project() else { return };
+            let rule = names::effective_naming(project);
+            let tags = names::track_tags(project, &project.tracks[track_index], track_index);
+            let mut scratch = project.tracks[track_index].clone();
+            scratch.filename.clear();
+            names::filename_for(&rule, &scratch, &tags, track_index)
+        };
+        if let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(track_index)) {
+            if !filename.is_empty() {
+                track.filename = filename;
+            }
+        }
+        self.push_track(window, cx);
         self.mark_dirty(cx);
+        self.status = "已填入勾选的曲名.".into();
+    }
+
+    fn apply_movement_rows(&mut self, rows: &[AiRow], window: &mut Window, cx: &mut Context<Self>) {
+        let titles = rows.iter().map(|row| row.value.trim().to_string()).filter(|item| !item.is_empty()).collect::<Vec<_>>();
+        if titles.is_empty() {
+            self.show_error("请至少保留一段乐章.", cx);
+            return;
+        }
+        self.pull(cx);
+        let Some(index) = self.track_index else {
+            self.show_error("请先选择曲目.", cx);
+            return;
+        };
+        {
+            let Some(project) = self.project_mut() else { return };
+            if index >= project.tracks.len() {
+                return;
+            }
+            let current = project.tracks[index].clone();
+            let expanded = program::expand_movements(&current, &titles);
+            let _ = project.tracks.splice(index..=index, expanded);
+        }
+        self.track_index = Some(index);
+        self.track_picks.clear();
+        self.movement_open = false;
+        self.push_track(window, cx);
+        self.mark_dirty(cx);
+        self.status = format!("已展开 {} 个乐章.", titles.len()).into();
+    }
+
+    fn apply_group_rows(&mut self, rows: &[AiRow], window: &mut Window, cx: &mut Context<Self>) {
+        let mut groups = rows.iter().filter(|row| row.indexes.len() >= 2).map(|row| (row.value.trim().to_string(), row.indexes.clone())).collect::<Vec<_>>();
+        groups.sort_by_key(|(_, indexes)| std::cmp::Reverse(indexes.first().copied().unwrap_or(0)));
+        if groups.is_empty() {
+            self.show_error("没有可合并的组.", cx);
+            return;
+        }
+        let count = groups.len();
+        for (title, indexes) in groups {
+            let first = indexes[0];
+            self.track_picks = indexes.into_iter().collect();
+            if !self.merge_selected(window, cx) {
+                return;
+            }
+            if !title.is_empty() {
+                if let Some(track) = self.project_mut().and_then(|project| project.tracks.get_mut(first)) {
+                    track.tags.title = title;
+                }
+                self.push_track(window, cx);
+                self.mark_dirty(cx);
+            }
+        }
+        self.close_ai(cx);
+        self.status = format!("已合并 {count} 组.").into();
+    }
+
+    fn apply_english_rows(&mut self, rows: &[AiRow], window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let count = {
+            let Some(project) = self.project_mut() else { return };
+            let mut count = 0;
+            for row in rows {
+                if row.value.trim().is_empty() {
+                    continue;
+                }
+                llm::apply_field(project, &row.key, row.value.trim());
+                count += 1;
+            }
+            count
+        };
+        self.push(window, cx);
+        self.mark_dirty(cx);
+        self.status = format!("已填入 {count} 项英文.").into();
+    }
+
+    fn apply_cover_rows(&mut self, rows: &[AiRow], window: &mut Window, cx: &mut Context<Self>) {
+        self.cover_undo = Some((text(&self.cover_title, cx), text(&self.cover_performer, cx), text(&self.cover_detail, cx), self.cover_layout));
+        for row in rows {
+            match row.key.as_str() {
+                "title" => set_text(&self.cover_title, row.value.trim(), window, cx),
+                "performer" => set_text(&self.cover_performer, row.value.trim(), window, cx),
+                "detail" => set_text(&self.cover_detail, row.value.trim(), window, cx),
+                "layout" => {
+                    if let Some(layout) = layout_index(&row.value) {
+                        self.cover_layout = layout;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.status = "已填入封面文案. 可以继续改字, 再更新预览. 还没有用作专辑封面.".into();
+    }
+
+    fn retry_ai(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(draft) = self.ai_draft.clone() else { return };
+        if draft.retry_task.is_empty() {
+            self.show_error("这次结果没有可重新提交的原文.", cx);
+            return;
+        }
+        let note = text(&self.ai_note, cx);
+        if note.trim().is_empty() {
+            self.show_error("请先写下要改的意见.", cx);
+            return;
+        }
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        let task = draft.retry_task.clone();
+        let original = draft.retry_text.clone();
+        let sent = llm::with_comment(&original, &note);
+        let images = draft.retry_images.clone();
+        let task_name = task.clone();
+        self.ai_retry = Some(super::AiRetry { task: task.clone(), text: original.clone(), images: images.clone() });
+        match task.as_str() {
+            "search" => {
+                let mut clues = serde_json::from_str::<serde_json::Value>(&original).unwrap_or_else(|_| serde_json::json!({}));
+                if let Some(object) = clues.as_object_mut() {
+                    object.insert("comment".into(), serde_json::Value::String(note.trim().to_string()));
+                }
+                self.spawn_job(cx, move || match llm::search_session(&config, &clues) {
+                    Ok(items) => JobMsg::Sessions(Ok(items)),
+                    Err(error) => JobMsg::Sessions(Err(error.to_string())),
+                });
+            }
+            "english" => {
+                let Some(project) = self.project().cloned() else {
+                    self.show_error("请先建立项目.", cx);
+                    return;
+                };
+                let note = note.trim().to_string();
+                self.spawn_job(cx, move || match llm::suggest_english_note(&config, &project, &note) {
+                    Ok(items) => JobMsg::English(Ok(items)),
+                    Err(error) => JobMsg::English(Err(error.to_string())),
+                });
+            }
+            "groups" => {
+                let Some(project) = self.project().cloned() else { return };
+                let count = project.tracks.len();
+                let titles: Vec<String> = project.tracks.iter().map(|track| track.tags.title.clone()).collect();
+                self.spawn_job(cx, move || match llm::recognize(&config, "groups", &sent, &[]) {
+                    Ok(text) => match llm::parse_merge_groups(&text, count) {
+                        Ok(groups) => {
+                            let groups = groups.into_iter().filter(|group| {
+                                let names = group.indexes.iter().filter_map(|index| titles.get(*index).map(String::as_str)).collect::<Vec<_>>();
+                                names.len() == group.indexes.len() && names::model_group_allowed(&names)
+                            }).collect();
+                            JobMsg::Groups(Ok(groups))
+                        }
+                        Err(error) => JobMsg::Groups(Err(error.to_string())),
+                    },
+                    Err(error) => JobMsg::Groups(Err(error.to_string())),
+                });
+            }
+            "filenames" => {
+                self.spawn_job(cx, move || match llm::recognize(&config, "filenames", &sent, &[]) {
+                    Ok(text) => match llm::parse_name_hits(&text) {
+                        Ok(items) => JobMsg::Names(Ok(items)),
+                        Err(error) => JobMsg::Names(Err(error.to_string())),
+                    },
+                    Err(error) => JobMsg::Names(Err(error.to_string())),
+                });
+            }
+            "movements" => {
+                self.spawn_job(cx, move || match llm::recognize(&config, "movements", &sent, &[]) {
+                    Ok(text) => match llm::parse_movements(&text) {
+                        Ok((_, _, parts)) => JobMsg::Parts(Ok(parts.join(" | "))),
+                        Err(error) => JobMsg::Parts(Err(error.to_string())),
+                    },
+                    Err(error) => JobMsg::Parts(Err(error.to_string())),
+                });
+            }
+            "cover" => {
+                self.spawn_job(cx, move || match llm::recognize(&config, "cover", &sent, &[]) {
+                    Ok(text) => match crate::coverart::parse_design(&text) {
+                        Ok(design) => JobMsg::CoverDesign(design),
+                        Err(error) => JobMsg::Done { operation: "设计封面", result: Err(error.to_string()) },
+                    },
+                    Err(error) => JobMsg::Done { operation: "设计封面", result: Err(error.to_string()) },
+                });
+            }
+            "program" | "session" | "cd" | "tags" => {
+                let cd = task_name == "cd";
+                let include_tracks = task_name != "session";
+                let request = original;
+                self.spawn_job(cx, move || {
+                    let outcome = llm::recognize(&config, &task_name, &sent, &images);
+                    match outcome {
+                        Ok(text) => JobMsg::Import { cd, include_tracks, text, task: task_name, request, images },
+                        Err(error) => JobMsg::Done { operation: "重新识别", result: Err(error.to_string()) },
+                    }
+                });
+            }
+            _ => self.show_error("这项不能重新识别.", cx),
+        }
+    }
+}
+
+struct AiRow {
+    key: String,
+    on: bool,
+    value: String,
+    extra: String,
+    start: String,
+    end: String,
+    indexes: Vec<usize>,
+}
+
+fn lines_from_program(imported: &program::ImportedProgram, include_tracks: bool) -> Vec<super::AiLine> {
+    let mut lines = Vec::new();
+    {
+        let mut push = |key: &str, label: &str, value: &Option<String>| {
+            if let Some(value) = value.as_ref().map(|item| item.trim()).filter(|item| !item.is_empty()) {
+                lines.push(super::AiLine::field(key, label, value));
+            }
+        };
+        push("name", "场次 / 专辑名", &imported.name);
+        push("performer", "演奏家", &imported.performer);
+        push("conductor", "指挥", &imported.conductor);
+        push("orchestra", "乐团", &imported.orchestra);
+        push("composer", "作曲家", &imported.composer);
+        push("date", "日期", &imported.date);
+        push("city", "城市", &imported.city);
+        push("venue", "音乐厅", &imported.venue);
+        push("origin", "录音来源", &imported.origin);
+    }
+    if include_tracks {
+        for (index, track) in imported.tracks.iter().enumerate() {
+            if track.title.trim().is_empty() {
+                continue;
+            }
+            lines.push(super::AiLine::track(index, &track.title, &track.composer, &track.start, &track.end));
+        }
+    }
+    lines
+}
+
+fn program_from_rows(rows: &[AiRow]) -> program::ImportedProgram {
+    let mut imported = program::ImportedProgram::default();
+    for row in rows {
+        let value = row.value.trim();
+        match row.key.as_str() {
+            "name" if !value.is_empty() => imported.name = Some(value.into()),
+            "date" if !value.is_empty() => imported.date = Some(value.into()),
+            "performer" if !value.is_empty() => imported.performer = Some(value.into()),
+            "conductor" if !value.is_empty() => imported.conductor = Some(value.into()),
+            "composer" if !value.is_empty() => imported.composer = Some(value.into()),
+            "orchestra" if !value.is_empty() => imported.orchestra = Some(value.into()),
+            "city" if !value.is_empty() => imported.city = Some(value.into()),
+            "venue" if !value.is_empty() => imported.venue = Some(value.into()),
+            "origin" if !value.is_empty() => imported.origin = Some(value.into()),
+            key if key.starts_with("track") && !value.is_empty() => imported.tracks.push(program::ImportedTrack { title: value.into(), composer: row.extra.trim().into(), start: row.start.clone(), end: row.end.clone() }),
+            _ => {}
+        }
+    }
+    imported
+}
+
+fn layout_index(value: &str) -> Option<usize> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ivory" | "0" | "象牙白" => Some(0),
+        "dark" | "1" | "深色" => Some(1),
+        "photo" | "2" | "通幅" => Some(2),
+        _ => None,
     }
 }
 

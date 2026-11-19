@@ -315,6 +315,24 @@ fn titles_and_movement_groups_follow_the_work_not_the_movement() {
     let groups = names::suggest_movement_groups(&one);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].indexes, vec![0, 1, 2]);
+
+    let valses = titled(&[
+        "Valses Sentimentales, Op.50 D770 - No. 4",
+        "Valses Sentimentales, Op.50 D770 - No. 5",
+        "Valses Sentimentales, Op.50 D770 - No. 6",
+        "Valses Sentimentales, Op.50 D770 - No. 7",
+        "Valses Sentimentales, Op.50 D770 - No. 8",
+    ]);
+    let groups = names::suggest_movement_groups(&valses);
+    assert_eq!(groups.len(), 1, "{groups:?}");
+    assert_eq!(groups[0].indexes, vec![0, 1, 2, 3, 4]);
+    let bare = titled(&["Valse D770 Nr. 1", "Valse D770 Nr. 2", "Valse D770 Nr. 3"]);
+    assert_eq!(names::suggest_movement_groups(&bare)[0].indexes, vec![0, 1, 2]);
+    let chinese = titled(&["华尔兹 Op. 50 第1首", "华尔兹 Op. 50 第2首"]);
+    assert_eq!(names::suggest_movement_groups(&chinese).len(), 1);
+    assert!(names::model_group_allowed(&["Valses Sentimentales, Op.50 D770 - No. 4", "Valses Sentimentales, Op.50 D770 - No. 5"]));
+    assert!(!names::model_group_allowed(&["Piano Sonata No. 1 in F minor, Op. 2 No. 1", "Piano Sonata No. 2 in A major, Op. 2 No. 2", "Piano Sonata No. 3 in C major, Op. 2 No. 3"]));
+    assert!(names::model_group_allowed(&["Piano Sonata No. 1, Op. 2 No. 1: I. Allegro", "Piano Sonata No. 1, Op. 2 No. 1: II. Adagio"]));
 }
 
 #[test]

@@ -747,6 +747,11 @@ fn suite_kind(title: &str) -> Option<&'static str> {
         ("玛祖卡", "mazurka"),
         ("mazurka", "mazurka"),
         ("圆舞曲", "waltz"),
+        ("华尔兹", "waltz"),
+        ("waltzes", "waltz"),
+        ("valses", "waltz"),
+        ("valse", "waltz"),
+        ("walzer", "waltz"),
         ("waltz", "waltz"),
         ("变奏", "variation"),
         ("variation", "variation"),
@@ -760,7 +765,7 @@ fn suite_kind(title: &str) -> Option<&'static str> {
 
 fn suite_display(title: &str) -> Option<String> {
     let lower = title.to_ascii_lowercase();
-    const WORDS: &[&str] = &["即兴曲", "impromptus", "impromptu", "音乐瞬间", "moments musicaux", "moment musical", "组曲", "suite", "前奏曲", "preludes", "prelude", "练习曲", "études", "etudes", "étude", "etude", "夜曲", "nocturne", "玛祖卡", "mazurka", "圆舞曲", "waltz", "变奏", "variations", "variation", "间奏曲", "intermezzo", "套曲"];
+    const WORDS: &[&str] = &["即兴曲", "impromptus", "impromptu", "音乐瞬间", "moments musicaux", "moment musical", "组曲", "suite", "前奏曲", "preludes", "prelude", "练习曲", "études", "etudes", "étude", "etude", "夜曲", "nocturne", "玛祖卡", "mazurka", "圆舞曲", "华尔兹", "waltzes", "valses", "valse", "walzer", "waltz", "变奏", "variations", "variation", "间奏曲", "intermezzo", "套曲"];
     WORDS.iter().find_map(|word| {
         let index = lower.find(word)?;
         Some(title[index..index + word.len()].to_string())
@@ -774,7 +779,7 @@ fn piece_span(title: &str) -> Option<(u32, usize, usize)> {
     let mut index = 0;
     while index + 2 < bytes.len() {
         let boundary = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
-        if boundary && bytes[index] == b'n' && bytes[index + 1] == b'o' {
+        if boundary && bytes[index] == b'n' && (bytes[index + 1] == b'o' || bytes[index + 1] == b'r') {
             let mut cursor = index + 2;
             if cursor < bytes.len() && bytes[cursor] == b'.' {
                 cursor += 1;
@@ -829,7 +834,7 @@ fn catalogue_display(title: &str) -> Option<String> {
 fn catalogue_match(title: &str) -> Option<(String, usize, usize)> {
     let lower = title.to_ascii_lowercase();
     let bytes = lower.as_bytes();
-    for (prefix, token) in [("deutsch", "d"), ("d.", "d"), ("d ", "d"), ("op.", "op"), ("op ", "op"), ("bwv", "bwv"), ("woo", "woo"), ("k.", "k"), ("kv ", "k")] {
+    for (prefix, token) in [("deutsch", "d"), ("d.", "d"), ("d ", "d"), ("op.", "op"), ("op ", "op"), ("bwv", "bwv"), ("woo", "woo"), ("k.", "k"), ("kv ", "k"), ("d", "d")] {
         let mut from = 0;
         while let Some(rel) = lower[from..].find(prefix) {
             let found = from + rel;
@@ -849,6 +854,20 @@ fn catalogue_match(title: &str) -> Option<(String, usize, usize)> {
         }
     }
     None
+}
+
+pub fn model_group_allowed(titles: &[&str]) -> bool {
+    if titles.len() < 2 || titles.iter().any(|title| title.trim().is_empty()) {
+        return false;
+    }
+    if !titles.iter().all(|title| independent_work(title)) {
+        return true;
+    }
+    let numbers: Vec<Option<u32>> = titles.iter().map(|title| piece_span(title).map(|(number, _, _)| number)).collect();
+    if numbers.iter().any(|number| number.is_none()) {
+        return titles.iter().all(|title| movement_mark(title).is_some());
+    }
+    numbers.windows(2).all(|pair| pair[0] == pair[1])
 }
 
 fn movement_mark(title: &str) -> Option<(String, u32)> {
