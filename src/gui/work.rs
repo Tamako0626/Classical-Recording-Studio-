@@ -2906,7 +2906,7 @@ impl Studio {
             .flex_col()
             .gap(px(8.))
             .child(div().text_size(px(14.)).child("匹配规范文件名"))
-            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("本地曲目表, MusicBrainz 和模型建议列在一起. 选择一个文件名."))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("本地曲目表, MusicBrainz 和模型建议列在一起. 点一条就填入当前曲目."))
             .child(Checkbox::new("update-name-tags").label("同时更新 Title 和 Composer").checked(self.name_update_tags).on_change(cx.listener(|this, value: &bool, _, cx| {
                 this.name_update_tags = *value;
                 cx.notify();
@@ -2927,9 +2927,12 @@ impl Studio {
         if self.name_choices.is_empty() {
             list = list.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("还没有候选. 可补充曲名, 或查找 MusicBrainz."));
         }
+        let current = self.track_index.and_then(|index| self.project().and_then(|project| project.tracks.get(index))).map(|track| track.filename.clone()).unwrap_or_default();
+        let format = self.project().map(|item| item.settings.format.to_lowercase()).unwrap_or_else(|| "flac".into());
         for (index, choice) in self.name_choices.iter().enumerate() {
-            let label = format!("{}.{}  {} · {}", choice.stem, self.project().map(|item| item.settings.format.to_lowercase()).unwrap_or_else(|| "flac".into()), choice.source, if choice.composer.is_empty() { choice.title.clone() } else { format!("{} · {}", choice.title, choice.composer) });
-            list = list.child(plain_btn(Button::new(SharedString::from(format!("pick-name-{index}"))).label(label).on_click(cx.listener(move |this, _, window, cx| this.choose_name(index, window, cx)))));
+            let label = format!("{}.{}  {} · {}", choice.stem, format, choice.source, if choice.composer.is_empty() { choice.title.clone() } else { format!("{} · {}", choice.title, choice.composer) });
+            let picked = choice.stem == current;
+            list = list.child(plain_btn(Button::new(SharedString::from(format!("pick-name-{index}"))).label(label).selected(picked).on_click(cx.listener(move |this, _, window, cx| this.choose_name(index, window, cx)))).w_full());
         }
         list
     }
@@ -3285,10 +3288,6 @@ impl Studio {
 
     fn choose_name(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(choice) = self.name_choices.get(index).cloned() else { return };
-        if choice.source.contains("模型") {
-            self.hold_name_text(&choice.title, &choice.composer, cx);
-            return;
-        }
         self.pull(cx);
         let Some(track_index) = self.track_index else { return };
         let update_tags = self.name_update_tags;
@@ -3301,10 +3300,13 @@ impl Studio {
                 }
             }
         }
-        self.name_open = false;
+        if matches!(self.ai_draft.as_ref().map(|draft| &draft.kind), Some(super::AiKind::Names)) {
+            self.ai_draft = None;
+            self.ai_gen = self.ai_gen.wrapping_add(1);
+        }
         self.push_track(window, cx);
         self.mark_dirty(cx);
-        self.status = "已选用这个文件名.".into();
+        self.status = "已填入这个文件名.".into();
     }
 
     fn load_movements(&mut self, cx: &mut Context<Self>) {

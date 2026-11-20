@@ -957,9 +957,15 @@ impl Studio {
             JobMsg::Names(Ok(items)) => {
                 self.name_hits = items;
                 if self.name_open {
+                    if matches!(self.ai_draft.as_ref().map(|draft| &draft.kind), Some(AiKind::Names)) {
+                        self.ai_draft = None;
+                        self.ai_gen = self.ai_gen.wrapping_add(1);
+                    }
                     self.rebuild_name_choices();
+                    self.status = if self.name_hits.is_empty() { "模型没有给出足够明确的曲名. 点列表里的一条就会填入.".into() } else { "点一条就填入当前曲目.".into() };
+                } else {
+                    self.stage_names();
                 }
-                self.stage_names();
             }
             JobMsg::Names(Err(text)) => self.show_error(text, cx),
             JobMsg::Parts(Ok(text)) => {
