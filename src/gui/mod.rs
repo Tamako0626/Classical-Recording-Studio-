@@ -358,6 +358,8 @@ pub struct Studio {
     cover_detail: Entity<InputState>,
     page_scroll: gpui_kit::ScrollHandle,
     page_scroll_grab: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    popup_scroll: gpui_kit::ScrollHandle,
+    popup_scroll_grab: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     save_task: Option<Task<()>>,
     job_task: Option<Task<()>>,
     progress_task: Option<Task<()>>,
@@ -675,6 +677,8 @@ impl Studio {
             cover_detail,
             page_scroll: gpui_kit::ScrollHandle::new(),
             page_scroll_grab: std::rc::Rc::new(std::cell::Cell::new(None)),
+            popup_scroll: gpui_kit::ScrollHandle::new(),
+            popup_scroll_grab: std::rc::Rc::new(std::cell::Cell::new(None)),
             save_task: None,
             job_task: None,
             progress_task: None,
@@ -1949,7 +1953,37 @@ impl Studio {
         cx.notify();
     }
 
+    fn popup_title(&self) -> String {
+        if self.program_open {
+            if self.program_session { "识别场次信息" } else { "导入节目单" }.to_string()
+        } else if let Some(overlay) = self.overlay {
+            match overlay {
+                Overlay::Cd => chrome::label::CD,
+                Overlay::Video => chrome::label::COVER_VIDEO,
+                Overlay::Llm => chrome::label::LLM,
+                Overlay::Cover => "从场照制作专辑封面",
+            }
+            .to_string()
+        } else if let Some(draft) = &self.ai_draft {
+            draft.title.clone()
+        } else if self.name_open {
+            "匹配规范文件名".to_string()
+        } else if self.movement_open {
+            "展开乐章 / 分曲".to_string()
+        } else if self.tags_open {
+            "编辑曲目标签".to_string()
+        } else if self.fx_open {
+            "试听处理效果".to_string()
+        } else {
+            String::new()
+        }
+    }
+
     fn app_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        if !self.program_open && self.overlay.is_none() && self.ai_draft.is_none() && !self.name_open && !self.movement_open && !self.tags_open && !self.fx_open {
+            return None;
+        }
+        let title = self.popup_title();
         self.sync_program(window, cx);
         let body = if self.program_open {
             self.program_dialog(window, cx)
@@ -1962,11 +1996,9 @@ impl Studio {
         } else if self.movement_open {
             self.movement_panel(cx).into_any_element()
         } else if self.tags_open {
-            div().flex().flex_col().gap(px(8.)).child(div().text_size(px(16.)).child("编辑曲目标签")).child(work::tag_form(self)).into_any_element()
-        } else if self.fx_open {
-            self.fx_panel(cx).into_any_element()
+            work::tag_form(self).into_any_element()
         } else {
-            return None;
+            self.fx_panel(cx).into_any_element()
         };
         Some(
             div()
@@ -1983,51 +2015,62 @@ impl Studio {
                     div()
                         .id("app-popup")
                         .w(px(920.))
-                        .max_h(px(720.))
-                        .overflow_y_scroll()
+                        .h(px(680.))
+                        .flex()
+                        .flex_col()
                         .bg(rgb(0xffffff))
                         .text_color(rgb(0x222037))
                         .border_1()
                         .border_color(rgb(0xe5e1ed))
                         .rounded(px(14.))
-                        .p(px(18.))
-                        .child(body),
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h(px(56.))
+                                .px(px(18.))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .border_b_1()
+                                .border_color(rgb(0xe5e1ed))
+                                .child(div().text_size(px(18.)).child(title))
+                                .child(Button::new("popup-close").small().label(chrome::label::CLOSE).on_click(cx.listener(|this, _, _, cx| this.dismiss_layer(cx)))),
+                        )
+                        .child(
+                            div()
+                                .id("popup-body")
+                                .relative()
+                                .flex_1()
+                                .min_h(px(0.))
+                                .child(
+                                    div()
+                                        .id("popup-scroll")
+                                        .absolute()
+                                        .top(px(0.))
+                                        .left(px(0.))
+                                        .right(px(18.))
+                                        .bottom(px(0.))
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.popup_scroll)
+                                        .px(px(18.))
+                                        .py(px(16.))
+                                        .child(body),
+                                )
+                                .child(vertical_scrollbar(self.popup_scroll.clone(), self.popup_scroll_grab.clone())),
+                        ),
                 )
                 .into_any_element(),
         )
     }
 
     fn overlay_page(&mut self, overlay: Overlay, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let title = match overlay {
-            Overlay::Cd => chrome::label::CD,
-            Overlay::Video => chrome::label::COVER_VIDEO,
-            Overlay::Llm => chrome::label::LLM,
-            Overlay::Cover => "从场照制作专辑封面",
-        };
-        let body = match overlay {
+        match overlay {
             Overlay::Cd => self.cd_page(cx),
             Overlay::Video => self.video_page(cx),
             Overlay::Llm => self.llm_page(cx),
             Overlay::Cover => self.cover_page(cx),
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(title)
-                    .child(Button::new("close-overlay").small().label(chrome::label::CLOSE).on_click(cx.listener(|this, _, _, cx| {
-                        this.overlay = None;
-                        cx.notify();
-                    }))),
-            )
-            .child(body)
-            .into_any_element()
+        }
     }
 
     fn place(&self) -> chrome::Place {

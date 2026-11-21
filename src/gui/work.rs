@@ -2053,7 +2053,6 @@ impl Studio {
     }
 
     pub(super) fn program_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let title = if self.program_session { "识别场次信息" } else { "导入节目单" };
         let files = if self.program_files.is_empty() {
             "未选择文件".to_string()
         } else {
@@ -2115,18 +2114,6 @@ impl Studio {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_size(px(18.)).child(title))
-                    .child(quiet_btn(Button::new("program-close").label("关闭").on_click(cx.listener(|this, _, _, cx| {
-                        this.program_open = false;
-                        cx.notify();
-                    })))),
-            )
             .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("上传图片 (可多选) 或 TXT 文件"))
             .child(
                 div()
