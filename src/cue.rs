@@ -704,6 +704,32 @@ fn unparsed(number: u32, label: String, cue_path: &str, dir: &str, audios: &[(St
     }
 }
 
+pub fn loose_tracks(files: &[(String, String)]) -> Vec<CueTrack> {
+    files
+        .iter()
+        .filter(|(name, _)| crate::names::audio_name(name))
+        .enumerate()
+        .map(|(index, (name, path))| CueTrack {
+            number: (index + 1) as u32,
+            source: name.clone(),
+            path: path.clone(),
+            start: "00:00".into(),
+            end: String::new(),
+            title: title_from_leaf(name),
+            artist: String::new(),
+            composer: String::new(),
+            filename: String::new(),
+        })
+        .collect()
+}
+
+fn title_from_leaf(name: &str) -> String {
+    let stem = Path::new(name).file_stem().map(|item| item.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string());
+    let trimmed = stem.trim();
+    let rest = trimmed.trim_start_matches(|ch: char| ch.is_ascii_digit()).trim_start_matches(['.', '-', '_', ' ']);
+    if rest.is_empty() { trimmed.to_string() } else { rest.to_string() }
+}
+
 pub fn parse_disc_cue(cue_path: &Path, files: &[(String, String)]) -> StudioResult<(CueAlbum, Vec<CueTrack>)> {
     parse_disc_cue_near(cue_path, files, "")
 }
@@ -939,6 +965,23 @@ FILE "disc.wav" WAVE
         assert!(discs[0].issue.is_empty(), "{}", discs[0].issue);
         assert!(discs[0].rows[0].path.contains("CD1.flac"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn loose_audio_files_become_whole_tracks() {
+        let files = vec![
+            ("01 - Allegro.flac".into(), r"C:\cd\01 - Allegro.flac".into()),
+            ("02. Andante.wav".into(), r"C:\cd\02. Andante.wav".into()),
+            ("notes.cue".into(), r"C:\cd\notes.cue".into()),
+        ];
+        let rows = loose_tracks(&files);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].title, "Allegro");
+        assert_eq!(rows[0].start, "00:00");
+        assert!(rows[0].end.is_empty());
+        assert_eq!(rows[0].path, r"C:\cd\01 - Allegro.flac");
+        assert_eq!(rows[1].title, "Andante");
+        assert_eq!(rows[1].number, 2);
     }
 
     #[test]

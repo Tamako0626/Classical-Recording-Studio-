@@ -731,48 +731,39 @@ impl Studio {
             );
         }
         super::surface()
-            .child(Label::new("一套 CD 可以一次加入多张整轨和对应 CUE, 封面封底全套共用."))
+            .child(Label::new("一套 CD 可以一次加入多张整轨和对应 CUE. 没有 CUE 的多条音轨可以按独立音轨识别, 每首使用完整文件."))
             .child(Label::new(format!("已配对 {} / {} 张. 封面和封底全套共用.", self.cd_discs.iter().filter(|disc| disc.issue.is_empty() && !disc.rows.is_empty()).count(), self.cd_discs.len())))
             .child(Label::new(self.cd_notice.clone()))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(Button::new("cd-files").label("批量添加文件").on_click(cx.listener(|this, _, window, cx| this.pick_cd(window, cx))))
-                    .child(Button::new("cd-folder").label("添加文件夹").on_click(cx.listener(|this, _, window, cx| this.pick_cd_folder(window, cx))))
-                    .child(Button::new("cd-paste").label("从剪贴板读取曲目").on_click(cx.listener(|this, _, window, cx| this.paste_tracks(window, cx))))
-                    .child(Button::new("cd-up").small().label("上移碟").on_click(cx.listener(|this, _, window, cx| this.move_disc(-1, window, cx))))
-                    .child(Button::new("cd-down").small().label("下移碟").on_click(cx.listener(|this, _, window, cx| this.move_disc(1, window, cx))))
-                    .child(Button::new("cd-remove").small().danger().label("移除当前碟").on_click(cx.listener(|this, _, window, cx| this.remove_disc(window, cx)))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(Button::new("cd-cover").small().label("套装封面").on_click(cx.listener(|this, _, window, cx| {
-                        this.ensure_project();
-                        this.pick_cover(false, window, cx);
-                    })))
-                    .child(Button::new("cd-back").small().label("套装封底").on_click(cx.listener(|this, _, window, cx| {
-                        this.ensure_project();
-                        this.pick_cover(true, window, cx);
-                    })))
-                    .child(Label::new(cover_label(self.project())))
-                    .child(Button::new("cd-cue").small().label("为当前碟指定 CUE").on_click(cx.listener(|this, _, window, cx| this.assign_cue(window, cx))))
-                    .child(Button::new("cd-audio").small().label("为当前碟添加音频").on_click(cx.listener(|this, _, window, cx| this.add_disc_audio(window, cx))))
-                    .child(Button::new("cd-model").small().label("用模型识别封面与封底").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_cd(cx))))
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(Button::new("cd-import").primary().label("导入到当前项目").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::Append, window, cx))))
-                    .child(Button::new("cd-next").label(chrome::label::APPEND_DISC).on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::NextDisc, window, cx))))
-                    .child(Button::new("cd-replace").danger().label("替换全部曲目").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::Replace, window, cx)))),
-            )
+            .child(cd_button_row(vec![
+                Button::new("cd-files").label("批量添加文件").on_click(cx.listener(|this, _, window, cx| this.pick_cd(window, cx))),
+                Button::new("cd-folder").label("添加文件夹").on_click(cx.listener(|this, _, window, cx| this.pick_cd_folder(window, cx))),
+                Button::new("cd-loose").label("无 CUE 多轨").on_click(cx.listener(|this, _, window, cx| this.recognize_loose(window, cx))),
+                Button::new("cd-paste").label("从剪贴板读取曲目").on_click(cx.listener(|this, _, window, cx| this.paste_tracks(window, cx))),
+            ]))
+            .child(cd_button_row(vec![
+                Button::new("cd-cue").label("为当前碟指定 CUE").on_click(cx.listener(|this, _, window, cx| this.assign_cue(window, cx))),
+                Button::new("cd-audio").label("为当前碟添加音频").on_click(cx.listener(|this, _, window, cx| this.add_disc_audio(window, cx))),
+                Button::new("cd-up").label("上移碟").on_click(cx.listener(|this, _, window, cx| this.move_disc(-1, window, cx))),
+                Button::new("cd-down").label("下移碟").on_click(cx.listener(|this, _, window, cx| this.move_disc(1, window, cx))),
+                Button::new("cd-remove").danger().label("移除当前碟").on_click(cx.listener(|this, _, window, cx| this.remove_disc(window, cx))),
+            ]))
+            .child(cd_button_row(vec![
+                Button::new("cd-cover").label("套装封面").on_click(cx.listener(|this, _, window, cx| {
+                    this.ensure_project();
+                    this.pick_cover(false, window, cx);
+                })),
+                Button::new("cd-back").label("套装封底").on_click(cx.listener(|this, _, window, cx| {
+                    this.ensure_project();
+                    this.pick_cover(true, window, cx);
+                })),
+                Button::new("cd-model").label("用模型识别封面与封底").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.model_cd(cx))),
+            ]))
+            .child(Label::new(cover_label(self.project())))
+            .child(cd_button_row(vec![
+                Button::new("cd-import").primary().label("导入到当前项目").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::Append, window, cx))),
+                Button::new("cd-next").label(chrome::label::APPEND_DISC).on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::NextDisc, window, cx))),
+                Button::new("cd-replace").danger().label("替换全部曲目").on_click(cx.listener(|this, _, window, cx| this.import_cd(CdImport::Replace, window, cx))),
+            ]))
             .child(Form::new().child(super::field("专辑", &self.cd_title)).child(super::field("演出者", &self.cd_artist)).child(super::field("作曲家", &self.cd_composer)).child(super::field("日期", &self.cd_date)))
             .child(Label::new("碟"))
             .child(discs)
@@ -2675,6 +2666,57 @@ impl Studio {
                 .ok();
             }
         }));
+    }
+
+    fn recognize_loose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull_cd(cx);
+        self.store_disc();
+        if let Some(index) = self.cd_disc {
+            let ready = self.cd_discs.get(index).is_some_and(|disc| disc.rows.is_empty() && disc.files.iter().any(|(name, _)| names::audio_name(name)));
+            if ready {
+                let files = self.cd_discs[index].files.clone();
+                self.apply_loose_disc(Some(index), files, window, cx);
+                return;
+            }
+        }
+        super::defer_dialog(window, cx, || rfd::FileDialog::new().set_title("选择没有 CUE 的音轨").add_filter("音频", AUDIO_EXT).pick_files(), |this, files, window, cx| {
+            let Some(files) = files else { return };
+            let audio = cue::gather_entries(&files).into_iter().filter(|(name, _)| names::audio_name(name)).collect::<Vec<_>>();
+            this.apply_loose_disc(None, audio, window, cx);
+        });
+    }
+
+    fn apply_loose_disc(&mut self, index: Option<usize>, files: Vec<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = cue::loose_tracks(&files);
+        if rows.is_empty() {
+            self.show_error("没有找到音频.", cx);
+            return;
+        }
+        let count = rows.len();
+        if let Some(index) = index {
+            if let Some(disc) = self.cd_discs.get_mut(index) {
+                disc.files = files;
+                disc.rows = rows;
+                disc.cue_path.clear();
+                disc.issue.clear();
+            }
+        } else {
+            let number = self.cd_discs.iter().map(|disc| disc.number).max().unwrap_or(0).saturating_add(1);
+            self.cd_discs.push(cue::DiscDraft {
+                number,
+                label: "独立音轨".into(),
+                cue_path: String::new(),
+                directory: String::new(),
+                files,
+                album: cue::CueAlbum::default(),
+                rows,
+                issue: String::new(),
+            });
+            self.cd_disc = Some(self.cd_discs.len() - 1);
+        }
+        self.load_disc(window, cx);
+        self.cd_notice = format!("已把 {count} 个音频识别为独立音轨. 每首使用完整文件, 没有 CUE 时间.").into();
+        cx.notify();
     }
 
     fn pick_cd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4837,6 +4879,14 @@ fn check(id: &'static str, label: &'static str, on: bool, cx: &mut Context<Studi
         }
         this.mark_dirty(cx);
     }))
+}
+
+fn cd_button_row(buttons: Vec<Button>) -> impl IntoElement {
+    let mut row = div().flex().flex_row().gap(px(8.));
+    for button in buttons {
+        row = row.child(button);
+    }
+    row
 }
 
 fn mode_button(id: &'static str, label: &'static str, on: bool, cx: &mut Context<Studio>, mode: VideoMode) -> impl IntoElement {

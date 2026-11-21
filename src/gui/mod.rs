@@ -1982,7 +1982,7 @@ impl Studio {
                 .child(
                     div()
                         .id("app-popup")
-                        .w(px(760.))
+                        .w(px(920.))
                         .max_h(px(720.))
                         .overflow_y_scroll()
                         .bg(rgb(0xffffff))
