@@ -12,7 +12,7 @@ use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, img, px, rgb,
 };
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputState, Textarea};
 
 use crate::chrome;
 use crate::catalog;
@@ -67,8 +67,8 @@ impl Studio {
                             .flex()
                             .flex_row()
                             .gap(px(8.))
-                            .child(primary_btn(Button::new("read-session").label("识别场次信息").on_click(cx.listener(|this, _, window, cx| this.import_program(true, window, cx)))))
-                            .child(plain_btn(Button::new("import-program").label("导入节目单").on_click(cx.listener(|this, _, window, cx| this.import_program(false, window, cx)))))
+                            .child(primary_btn(Button::new("read-session").label("识别场次信息").on_click(cx.listener(|this, _, window, cx| this.open_program_dialog(true, window, cx)))))
+                            .child(plain_btn(Button::new("import-program").label("导入节目单").on_click(cx.listener(|this, _, window, cx| this.open_program_dialog(false, window, cx)))))
                             .child(plain_btn(Button::new("english-session").label(chrome::label::ENGLISH).disabled(self.busy).on_click(cx.listener(|this, _, window, cx| this.english_local(window, cx)))))
                             .child(quiet_btn(Button::new("english-model").label("用模型核对").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.request_english(cx))))),
                     ))
@@ -565,9 +565,6 @@ impl Studio {
             .flex_col()
             .child(div().px(px(19.)).pt(px(8.)).pb(px(8.)).flex().flex_col().gap(px(6.)).child(check("auto-join", chrome::label::JOIN, project.auto_join, cx, |project, value| project.auto_join = value)).child(div().text_size(px(12.)).line_height(px(19.)).text_color(rgb(0x66647a)).child("每轨可选择不同的音频文件，起止点以所选文件为准。可输入 18:22 或 01:18:22.500。点击「取播放点」填写当前时间，点击「试听」从本轨起点播放。")))
             .child(list);
-        if self.tags_open && selected.is_some() {
-            body = body.child(div().px(px(19.)).py(px(8.)).child(tag_form(self)));
-        }
         body = body.child(
             div()
                 .px(px(19.))
@@ -585,12 +582,6 @@ impl Studio {
                 .child(plain_btn(Button::new("merge-groups").label(chrome::label::MERGE_GROUPS).on_click(cx.listener(|this, _, window, cx| this.merge_groups(window, cx)))))
                 .child(plain_btn(Button::new("cycle-status").label(format!("状态: {}", project.status)).on_click(cx.listener(|this, _, _, cx| this.cycle_status(cx))))),
         );
-        if self.name_open {
-            body = body.child(self.name_panel(cx));
-        }
-        if self.movement_open {
-            body = body.child(self.movement_panel(cx));
-        }
         body.child(
             div()
                 .px(px(19.))
@@ -691,11 +682,7 @@ impl Studio {
             }))))
             .child(super::field("MusicBrainz", &self.mb_query))
             .child(Button::new("search-work").small().label("检索作品").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_work(cx))));
-        let mut column = div().flex().flex_col().gap(px(8.)).child(row);
-        if self.fx_open {
-            column = column.child(self.fx_panel(cx));
-        }
-        column
+        div().flex().flex_col().gap(px(8.)).child(row)
     }
 
     fn mb_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -966,7 +953,7 @@ impl Studio {
         let review = if self.review.is_empty() {
             div().flex().flex_col()
         } else {
-            div().flex().flex_col().gap_2().child(Label::new("英文建议在页面下方. 勾选要改的项, 可以直接改字, 也可以写意见后重新识别."))
+            div().flex().flex_col().gap_2().child(Label::new("英文建议在弹窗里. 勾选要改的项, 可以直接改字, 也可以写意见后重新识别."))
         };
         super::surface()
             .child(Label::new("API Key 只保存在本机, 不写入项目文件. 图片识别要勾选图像输入. 联网核对使用 DeepSeek 官方接口和 deepseek-flash."))
@@ -1979,50 +1966,407 @@ impl Studio {
         column
     }
 
-    fn import_program(&mut self, session_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_program_dialog(&mut self, session_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.pull(cx);
-        let title: &'static str = if session_only { "识别场次信息" } else { "导入节目单" };
+        let values = self.project().map(|project| {
+            [
+                project.name.clone(),
+                project.date.clone(),
+                project.performer.clone(),
+                project.conductor.clone(),
+                project.composer.clone(),
+                project.orchestra.clone(),
+                project.city.clone(),
+                project.venue.clone(),
+                project.origin.clone(),
+            ]
+        });
+        self.program_open = true;
+        self.program_session = session_only;
+        self.program_files.clear();
+        self.program_overwrite = false;
+        self.program_replace = false;
+        self.program_pending = None;
+        self.program_rows.clear();
+        self.program_track_sig.clear();
+        self.program_note = "上传图片, TXT, 或粘贴文字. 识别结果会填进下面的核对表.".into();
+        super::set_area(&self.program_text, "", window, cx);
+        self.program_seen.clear();
+        if let Some(values) = values {
+            for (input, value) in self.program_inputs.iter().zip(values) {
+                super::set_text(input, &value, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn sync_program(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.program_open {
+            return;
+        }
+        if let Some(text) = self.program_pending.take() {
+            super::set_area(&self.program_text, &text, window, cx);
+            self.program_seen.clear();
+        }
+        let raw = super::area_text(&self.program_text, cx);
+        if raw == self.program_seen {
+            return;
+        }
+        self.program_seen = raw.clone();
+        if raw.trim().is_empty() {
+            self.program_rows.clear();
+            self.program_track_sig.clear();
+            return;
+        }
+        let parsed = program::parse_program(&raw);
+        let found = [
+            parsed.name.clone(),
+            parsed.date.clone(),
+            parsed.performer.clone(),
+            parsed.conductor.clone(),
+            parsed.composer.clone(),
+            parsed.orchestra.clone(),
+            parsed.city.clone(),
+            parsed.venue.clone(),
+            parsed.origin.clone(),
+        ];
+        let field_count = found.iter().filter(|item| item.is_some()).count();
+        for (input, value) in self.program_inputs.iter().zip(found) {
+            if let Some(value) = value {
+                super::set_text(input, &value, window, cx);
+            }
+        }
+        if self.program_session {
+            self.program_rows.clear();
+            self.program_track_sig.clear();
+            self.program_note = if field_count == 0 { "未找到明确的场次字段. 可以补充标签, 或直接改下面的表格.".into() } else { format!("已识别 {field_count} 项场次信息. 请核对后填入.") };
+            return;
+        }
+        let signature = parsed.tracks.iter().map(|track| format!("{}|{}|{}|{}", track.title, track.composer, track.start, track.end)).collect::<Vec<_>>().join("\n");
+        self.program_note = format!("已识别 {field_count} 项场次信息和 {} 首曲目. 请核对后填入.", parsed.tracks.len());
+        if signature == self.program_track_sig {
+            return;
+        }
+        self.program_track_sig = signature;
+        self.program_rows = parsed
+            .tracks
+            .iter()
+            .map(|track| super::ProgramRow {
+                on: true,
+                title: cx.new(|cx| InputState::new(window, cx).default_value(track.title.clone())),
+                composer: cx.new(|cx| InputState::new(window, cx).default_value(track.composer.clone())),
+                start: track.start.clone(),
+                end: track.end.clone(),
+            })
+            .collect();
+    }
+
+    pub(super) fn program_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let title = if self.program_session { "识别场次信息" } else { "导入节目单" };
+        let files = if self.program_files.is_empty() {
+            "未选择文件".to_string()
+        } else {
+            self.program_files.iter().map(|path| path.file_name().and_then(|name| name.to_str()).unwrap_or("文件")).collect::<Vec<_>>().join(", ")
+        };
+        let mut fields = div().flex().flex_col().gap(px(8.));
+        let mut index = 0;
+        while index < super::PROGRAM_FIELDS.len() {
+            let mut row = div().flex().flex_row().gap(px(8.));
+            for slot in 0..2 {
+                let at = index + slot;
+                if at >= super::PROGRAM_FIELDS.len() {
+                    break;
+                }
+                let label = super::PROGRAM_FIELDS[at].1;
+                if let Some(input) = self.program_inputs.get(at) {
+                    row = row.child(div().flex_1().min_w(px(0.)).child(super::field(label, input)));
+                }
+            }
+            fields = fields.child(row);
+            index += 2;
+        }
+        let mut tracks = div().flex().flex_col().gap(px(6.));
+        if !self.program_session {
+            if self.program_rows.is_empty() {
+                tracks = tracks.child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("曲目会在识别文字后出现在这里. 用「1. 曲名」这样的行."));
+            }
+            for (index, row) in self.program_rows.iter().enumerate() {
+                let on = row.on;
+                let title_input = row.title.clone();
+                let composer_input = row.composer.clone();
+                tracks = tracks.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(Checkbox::new(SharedString::from(format!("program-track-{index}"))).checked(on).on_change(cx.listener(move |this, value: &bool, _, cx| {
+                            if let Some(row) = this.program_rows.get_mut(index) {
+                                row.on = *value;
+                            }
+                            cx.notify();
+                        })))
+                        .child(div().flex_1().min_w(px(0.)).child(Input::new(&title_input).small()))
+                        .child(div().w(px(160.)).child(Input::new(&composer_input).small()))
+                        .child(div().w(px(72.)).text_size(px(12.)).text_color(rgb(0x66647a)).child(if row.start.is_empty() { "起点".to_string() } else { row.start.clone() }))
+                        .child(div().w(px(72.)).text_size(px(12.)).text_color(rgb(0x66647a)).child(if row.end.is_empty() { "终点".to_string() } else { row.end.clone() })),
+                );
+            }
+        }
+        let mut hits = div().flex().flex_col().gap(px(6.));
+        if self.program_session {
+            for (index, hit) in self.session_hits.iter().enumerate() {
+                let label = [hit.name.as_str(), hit.performer.as_str(), hit.date.as_str(), hit.venue.as_str()].into_iter().filter(|item| !item.is_empty()).collect::<Vec<_>>().join(" · ");
+                hits = hits.child(plain_btn(Button::new(SharedString::from(format!("program-session-{index}"))).label(format!("使用此场次  {label}")).on_click(cx.listener(move |this, _, window, cx| this.use_program_session(index, window, cx)))));
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_size(px(18.)).child(title))
+                    .child(quiet_btn(Button::new("program-close").label("关闭").on_click(cx.listener(|this, _, _, cx| {
+                        this.program_open = false;
+                        cx.notify();
+                    })))),
+            )
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("上传图片 (可多选) 或 TXT 文件"))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(plain_btn(Button::new("program-file").label("选择文件").on_click(cx.listener(|this, _, window, cx| this.pick_program_files(window, cx)))))
+                    .child(div().flex_1().text_size(px(12.)).text_color(rgb(0x66647a)).child(files)),
+            )
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("输入或粘贴文字, 也可校对识别原文"))
+            .child(Textarea::new(&self.program_text).h(px(132.)))
+            .child(plain_btn(Button::new("program-model").label("用模型识别图片或文件").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.recognize_program(cx)))))
+            .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child(if self.program_session { "多张图片会交给模型识别. 核对后再填入场次." } else { "多张图片会交给模型识别. 未提供的分轨时间保持空白." }))
+            .child(div().text_size(px(12.)).text_color(rgb(0x5a3da8)).child(self.program_note.clone()))
+            .child(if self.program_session { div().text_size(px(14.)).child("核对场次信息") } else { div().text_size(px(14.)).child("场次与曲目") })
+            .child(fields)
+            .child(tracks)
+            .child(
+                Checkbox::new("program-overwrite")
+                    .label(if self.program_session { "用校对值替换分轨页已填写的场次字段" } else { "用导入值替换已填场次字段" })
+                    .checked(self.program_overwrite)
+                    .on_change(cx.listener(|this, value: &bool, _, cx| {
+                        this.program_overwrite = *value;
+                        cx.notify();
+                    })),
+            )
+            .child(if self.program_session {
+                div()
+            } else {
+                div().child(
+                    Checkbox::new("program-replace").label("替换现有曲目 (默认追加)").checked(self.program_replace).on_change(cx.listener(|this, value: &bool, _, cx| {
+                        this.program_replace = *value;
+                        cx.notify();
+                    })),
+                )
+            })
+            .child(if self.program_session {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(plain_btn(Button::new("program-search").label("联网核对").disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.search_program_session(cx)))))
+                    .child(div().text_size(px(12.)).text_color(rgb(0x66647a)).child("查询会把弹窗里的场次字段发给模型."))
+            } else {
+                div()
+            })
+            .child(hits)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(quiet_btn(Button::new("program-cancel").label("取消").on_click(cx.listener(|this, _, _, cx| {
+                        this.program_open = false;
+                        cx.notify();
+                    }))))
+                    .child(primary_btn(Button::new("program-apply").label(if self.program_session { "填入场次信息" } else { "填入分轨页" }).on_click(cx.listener(|this, _, window, cx| this.apply_program_dialog(window, cx))))),
+            )
+            .into_any_element()
+    }
+
+    fn pick_program_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title: &'static str = if self.program_session { "识别场次信息" } else { "导入节目单" };
         super::defer_dialog(window, cx, move || rfd::FileDialog::new().set_title(title).add_filter("图片或文本", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "txt", "md"]).pick_files(), move |this, files, window, cx| {
             let Some(files) = files else { return };
-            this.import_chosen_program(session_only, files, window, cx);
+            this.load_program_files(files, window, cx);
         });
     }
 
-    fn import_chosen_program(&mut self, session_only: bool, files: Vec<std::path::PathBuf>, _window: &mut Window, cx: &mut Context<Self>) {
+    fn load_program_files(&mut self, files: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let text = files.iter().filter(|path| text_file(path)).cloned().collect::<Vec<_>>();
         let images = files.iter().filter(|path| !text_file(path)).cloned().collect::<Vec<_>>();
         if !text.is_empty() && !images.is_empty() || text.len() > 1 {
-            self.show_error("请单独选择一个文本, 或一次选择多张图片.", cx);
+            self.program_note = "请单独选择一个文本, 或一次选择多张图片.".into();
+            cx.notify();
             return;
         }
         if let Some(file) = text.first() {
             let bytes = match std::fs::read(file) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    self.show_error(error.to_string(), cx);
+                    self.program_note = error.to_string();
+                    cx.notify();
                     return;
                 }
             };
-            self.intake_files.clear();
-            let parsed = program::parse_program(&program::decode_text(&bytes));
-            let lines = lines_from_program(&parsed, !session_only);
-            if lines.is_empty() {
-                self.show_error("没有识别到场次或曲目. 用「演奏家: 姓名」这样的行, 曲目用「1. 曲名」.", cx);
-                return;
-            }
-            self.stage_review(if session_only { "场次文本" } else { "节目单文本" }, super::AiKind::Facts { include_tracks: !session_only, cd: false }, lines, "", "", Vec::new());
-            self.status = "文本已读出. 请在下方勾选, 修改后再填入.".into();
+            self.program_files.clear();
+            super::set_area(&self.program_text, &program::decode_text(&bytes), window, cx);
+            self.program_seen.clear();
+            self.program_note = "文字已读入. 请核对下面的表格.".into();
             cx.notify();
             return;
         }
         if images.len() > 8 {
-            self.show_error("每次最多向视觉模型发送 8 张图片.", cx);
+            self.program_note = "每次最多向模型发送 8 张图片.".into();
+            cx.notify();
             return;
         }
-        self.intake_files = images;
-        self.intake_session = session_only;
-        self.status = format!("已选择 {} 张图片. 可点「用模型识别」, 场次也可以「联网核对」.", self.intake_files.len()).into();
+        self.program_files = images;
+        self.program_note = format!("已选择 {} 张图片. 点「用模型识别图片或文件」.", self.program_files.len());
         cx.notify();
+    }
+
+    fn recognize_program(&mut self, cx: &mut Context<Self>) {
+        let files = self.program_files.clone();
+        let request = super::area_text(&self.program_text, cx);
+        if files.is_empty() && request.trim().is_empty() {
+            self.program_note = "请先选择图片或粘贴文字.".into();
+            cx.notify();
+            return;
+        }
+        let session = self.program_session;
+        let task = if session { "session" } else { "program" };
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.program_note = "正在请模型识别…".into();
+        self.spawn_job(cx, move || match llm::recognize(&config, task, &request, &files) {
+            Ok(text) => JobMsg::Import { cd: false, include_tracks: !session, text, task: task.into(), request: String::new(), images: files },
+            Err(error) => JobMsg::Done { operation: "模型识别", result: Err(error.to_string()) },
+        });
+    }
+
+    fn search_program_session(&mut self, cx: &mut Context<Self>) {
+        let mut clues = serde_json::Map::new();
+        for (index, (key, _)) in super::PROGRAM_FIELDS.iter().enumerate() {
+            let Some(input) = self.program_inputs.get(index) else { continue };
+            let value = super::text(input, cx).trim().to_string();
+            if !value.is_empty() && *key != "origin" {
+                clues.insert((*key).to_string(), serde_json::Value::String(value));
+            }
+        }
+        if clues.is_empty() {
+            self.program_note = "请先填写演奏家, 日期, 音乐厅等已知场次信息.".into();
+            cx.notify();
+            return;
+        }
+        let clues = serde_json::Value::Object(clues);
+        self.ai_retry = Some(super::AiRetry { task: "search".into(), text: clues.to_string(), images: Vec::new() });
+        let config = llm::config_after_endpoint_change(&self.llm, read_llm(self, cx));
+        self.program_note = "正在搜索演出来源…".into();
+        self.spawn_job(cx, move || match llm::search_session(&config, &clues) {
+            Ok(items) => JobMsg::Sessions(Ok(items)),
+            Err(error) => JobMsg::Sessions(Err(error.to_string())),
+        });
+    }
+
+    fn use_program_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.session_hits.get(index).cloned() else { return };
+        let values = [hit.name, hit.date, hit.performer, hit.conductor, hit.composer, hit.orchestra, hit.city, hit.venue];
+        for (offset, value) in values.into_iter().enumerate() {
+            if value.trim().is_empty() {
+                continue;
+            }
+            if let Some(input) = self.program_inputs.get(offset) {
+                super::set_text(input, &value, window, cx);
+            }
+        }
+        self.program_note = "候选已填入核对表. 确认后点「填入场次信息」.".into();
+        cx.notify();
+    }
+
+    fn apply_program_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull(cx);
+        let overwrite = self.program_overwrite;
+        let session_only = self.program_session;
+        let replace = self.program_replace;
+        let mut values = Vec::new();
+        for input in &self.program_inputs {
+            values.push(super::text(input, cx));
+        }
+        let tracks = self
+            .program_rows
+            .iter()
+            .filter(|row| row.on)
+            .map(|row| (super::text(&row.title, cx).trim().to_string(), super::text(&row.composer, cx).trim().to_string(), row.start.clone(), row.end.clone()))
+            .filter(|(title, _, _, _)| !title.is_empty())
+            .collect::<Vec<_>>();
+        let Some(project) = self.project_mut() else {
+            self.program_note = "请先打开一个录音项目.".into();
+            cx.notify();
+            return;
+        };
+        let mut filled = 0;
+        {
+            let slots: [&mut String; 9] = [&mut project.name, &mut project.date, &mut project.performer, &mut project.conductor, &mut project.composer, &mut project.orchestra, &mut project.city, &mut project.venue, &mut project.origin];
+            for (slot, value) in slots.into_iter().zip(values) {
+                let value = value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                let default_origin = slot.as_str() == "现场自录";
+                if overwrite || slot.trim().is_empty() || default_origin {
+                    if slot != value {
+                        *slot = value.to_string();
+                        filled += 1;
+                    }
+                }
+            }
+        }
+        let mut imported = 0;
+        if !session_only && !tracks.is_empty() {
+            let source = project.sources.first().cloned().unwrap_or_default();
+            let made = tracks
+                .into_iter()
+                .map(|(title, composer, start, end)| {
+                    let mut track = Track::blank();
+                    track.source = source.clone();
+                    track.tags.title = title;
+                    track.tags.composer = composer;
+                    track.start = if start.is_empty() { "00:00".into() } else { start };
+                    track.end = end;
+                    track
+                })
+                .collect::<Vec<_>>();
+            imported = made.len();
+            if replace {
+                project.tracks = made;
+            } else {
+                project.tracks.extend(made);
+            }
+        }
+        if !session_only && imported > 0 {
+            self.track_index = Some(0);
+            self.track_picks.clear();
+        }
+        self.program_open = false;
+        self.push(window, cx);
+        self.mark_dirty(cx);
+        self.status = if imported > 0 { format!("已填入 {filled} 项场次信息, 并导入 {imported} 首曲目.").into() } else if filled > 0 { format!("已填入 {filled} 项场次信息.").into() } else { "已保留现有场次信息.".into() };
     }
 
     fn recognize_intake(&mut self, cx: &mut Context<Self>) {
@@ -2898,7 +3242,7 @@ impl Studio {
         img(std::path::PathBuf::from(path)).w(px(220.)).h(px(220.)).into_any_element()
     }
 
-    fn name_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn name_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div()
             .px(px(19.))
             .pb(px(8.))
@@ -2937,7 +3281,7 @@ impl Studio {
         list
     }
 
-    fn movement_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn movement_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div()
             .px(px(19.))
             .pb(px(8.))
@@ -2983,7 +3327,7 @@ impl Studio {
             )
     }
 
-    fn fx_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn fx_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let project = self.project().cloned();
         let mut row = div().flex().flex_row().gap(px(8.));
         if let Some(project) = &project {
@@ -3675,7 +4019,7 @@ impl Studio {
         self.pending_cd = cd;
         let title = if cd { "CD 识别" } else if include_tracks { "识别结果" } else { "场次识别" };
         self.stage_review(title, super::AiKind::Facts { include_tracks: include_tracks || cd, cd }, lines, task, request, images);
-        self.status = "模型已返回. 请在页面下方勾选要填入的项, 可以修改, 也可以写意见后重新识别.".into();
+        self.status = "模型已返回. 请在弹窗里勾选要填入的项, 可以修改, 也可以写意见后重新识别.".into();
     }
 
     pub(super) fn stage_names(&mut self) {
@@ -3686,7 +4030,7 @@ impl Studio {
         let lines = self.name_hits.iter().map(|hit| super::AiLine::pair("name", "曲名建议", &hit.title, &hit.composer)).collect();
         let (task, text, images) = self.current_retry("filenames");
         self.stage_review("文件名建议", super::AiKind::Names, lines, &task, &text, images);
-        self.status = "曲名建议在页面下方. 勾选一条, 修改后再填入当前曲目.".into();
+        self.status = "曲名建议在弹窗里. 勾选一条, 修改后再填入当前曲目.".into();
     }
 
     pub(super) fn stage_parts(&mut self) {
@@ -3697,7 +4041,7 @@ impl Studio {
         let lines = self.movement_parts.iter().map(|part| super::AiLine::field("part", "乐章", part)).collect();
         let (task, text, images) = self.current_retry("movements");
         self.stage_review("乐章建议", super::AiKind::Movements, lines, &task, &text, images);
-        self.status = "乐章在页面下方. 可以改字, 取消勾选, 或写意见后重新识别.".into();
+        self.status = "乐章在弹窗里. 可以改字, 取消勾选, 或写意见后重新识别.".into();
     }
 
     pub(super) fn stage_english(&mut self, _cx: &mut Context<Self>) {
@@ -3713,7 +4057,7 @@ impl Studio {
         }).collect();
         let (task, text, images) = self.current_retry("english");
         self.stage_review("英文建议", super::AiKind::English, lines, &task, &text, images);
-        self.status = "英文建议在页面下方. 勾选并修改后再填入.".into();
+        self.status = "英文建议在弹窗里. 勾选并修改后再填入.".into();
     }
 
     pub(super) fn stage_groups(&mut self, groups: Vec<llm::MergeSuggestion>) {
@@ -3727,7 +4071,7 @@ impl Studio {
         }).collect();
         let (task, text, images) = self.current_retry("groups");
         self.stage_review("合并建议", super::AiKind::Groups, lines, &task, &text, images);
-        self.status = "合并建议在页面下方. 勾选并修改标题后再合并, 也可以写意见重新识别.".into();
+        self.status = "合并建议在弹窗里. 勾选并修改标题后再合并, 也可以写意见重新识别.".into();
     }
 
     pub(super) fn stage_cover(&mut self, design: crate::coverart::CoverDesign) {
@@ -3744,7 +4088,7 @@ impl Studio {
         ];
         let (task, text, images) = self.current_retry("cover");
         self.stage_review("封面文案", super::AiKind::Cover, lines, &task, &text, images);
-        self.status = "封面方案在页面下方. 修改后再填入封面工作室, 不会直接用作专辑封面.".into();
+        self.status = "封面方案在弹窗里. 修改后再填入封面工作室, 不会直接用作专辑封面.".into();
     }
 
     fn stage_review(&mut self, title: &str, kind: super::AiKind, lines: Vec<super::AiLine>, task: &str, request: &str, images: Vec<std::path::PathBuf>) {
@@ -3918,7 +4262,7 @@ impl Studio {
         cx.notify();
     }
 
-    fn close_ai(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_ai(&mut self, cx: &mut Context<Self>) {
         self.ai_draft = None;
         self.ai_gen = self.ai_gen.wrapping_add(1);
         cx.notify();
@@ -4470,7 +4814,7 @@ fn short_clock(seconds: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-fn tag_form(studio: &Studio) -> impl IntoElement {
+pub(super) fn tag_form(studio: &Studio) -> impl IntoElement {
     Form::new()
         .child(super::field(TAG_KEYS[0], &studio.tags[0]))
         .child(super::field(TAG_KEYS[1], &studio.tags[1]))

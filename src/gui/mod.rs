@@ -8,7 +8,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     form::{Field, Form},
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, TextareaState},
     Theme,
 };
 use gpui_kit::{
@@ -149,6 +149,26 @@ pub(super) struct AiDraft {
     pub retry_images: Vec<std::path::PathBuf>,
 }
 
+const PROGRAM_FIELDS: &[(&str, &str)] = &[
+    ("name", "场次 / 专辑名"),
+    ("date", "演出日期"),
+    ("performer", "演奏家"),
+    ("conductor", "指挥家"),
+    ("composer", "作曲家"),
+    ("orchestra", "乐团"),
+    ("city", "城市"),
+    ("venue", "音乐厅"),
+    ("origin", "录音来源"),
+];
+
+struct ProgramRow {
+    on: bool,
+    title: Entity<InputState>,
+    composer: Entity<InputState>,
+    start: String,
+    end: String,
+}
+
 struct AiField {
     key: String,
     label: String,
@@ -201,6 +221,18 @@ pub struct Studio {
     movement_open: bool,
     intake_files: Vec<std::path::PathBuf>,
     intake_session: bool,
+    program_open: bool,
+    program_session: bool,
+    program_text: Entity<TextareaState>,
+    program_seen: String,
+    program_files: Vec<std::path::PathBuf>,
+    program_note: String,
+    program_overwrite: bool,
+    program_replace: bool,
+    program_pending: Option<String>,
+    program_inputs: Vec<Entity<InputState>>,
+    program_rows: Vec<ProgramRow>,
+    program_track_sig: String,
     session_hits: Vec<SessionCandidate>,
     name_hits: Vec<NameHit>,
     model_choices: Vec<String>,
@@ -403,6 +435,8 @@ impl Studio {
         let llm_base = cx.new(|cx| InputState::new(window, cx).placeholder("https://api.deepseek.com").default_value(llm.base_url.clone()));
         let llm_model = cx.new(|cx| InputState::new(window, cx).placeholder("deepseek-flash").default_value(llm.model.clone()));
         let llm_key = cx.new(|cx| InputState::new(window, cx).placeholder("API Key").default_value(llm.api_key.clone()).masked(true));
+        let program_text = cx.new(|cx| TextareaState::new(window, cx).placeholder("音乐会: 钢琴独奏会\n演奏家: 姓名\n日期: 2026-11-06\n音乐厅: 上海交响音乐厅\n1. 曲名"));
+        let program_inputs = (0..PROGRAM_FIELDS.len()).map(|_| cx.new(|cx| InputState::new(window, cx))).collect::<Vec<_>>();
         let watched = [
             name.clone(),
             performer.clone(),
@@ -504,6 +538,18 @@ impl Studio {
             movement_open: false,
             intake_files: Vec::new(),
             intake_session: false,
+            program_open: false,
+            program_session: false,
+            program_text,
+            program_seen: String::new(),
+            program_files: Vec::new(),
+            program_note: String::new(),
+            program_overwrite: false,
+            program_replace: false,
+            program_pending: None,
+            program_inputs,
+            program_rows: Vec::new(),
+            program_track_sig: String::new(),
             session_hits: Vec::new(),
             name_hits: Vec::new(),
             model_choices: Vec::new(),
@@ -947,11 +993,20 @@ impl Studio {
             }
             JobMsg::Works(Err(text)) => self.show_error(text, cx),
             JobMsg::Import { cd, include_tracks, text, task, request, images } => {
-                self.stage_import(cd, include_tracks, &text, &task, &request, images, cx);
+                if self.program_open && !cd {
+                    self.program_pending = Some(text);
+                    self.program_note = "模型已返回. 请在弹窗里核对后再填入.".into();
+                } else {
+                    self.stage_import(cd, include_tracks, &text, &task, &request, images, cx);
+                }
             }
             JobMsg::Sessions(Ok(items)) => {
                 self.session_hits = items;
-                self.status = if self.session_hits.is_empty() { "没有找到有来源的场次.".into() } else { format!("找到 {} 个场次候选. 点「核对这项」后可以修改再填入.", self.session_hits.len()).into() };
+                let note = if self.session_hits.is_empty() { "没有找到有来源的场次.".into() } else { format!("找到 {} 个场次候选. 点一条就填入核对表.", self.session_hits.len()) };
+                if self.program_open {
+                    self.program_note = note.clone();
+                }
+                self.status = note.into();
             }
             JobMsg::Sessions(Err(text)) => self.show_error(text, cx),
             JobMsg::Names(Ok(items)) => {
@@ -1055,9 +1110,9 @@ impl Studio {
             },
             chrome::Focus {
                 typing: event.prefer_character_input,
-                dialog: self.overlay.is_some() || self.exit_ask,
+                dialog: self.layer_open(),
                 lookup,
-                preview: self.page == Page::Split && self.overlay.is_none() && !self.exit_ask,
+                preview: self.page == Page::Split && !self.layer_open(),
                 composing: event.keystroke.is_ime_in_progress(),
             },
         );
@@ -1077,8 +1132,7 @@ impl Studio {
                 if self.exit_ask {
                     self.exit_cancel(cx);
                 } else {
-                    self.overlay = None;
-                    cx.notify();
+                    self.dismiss_layer(cx);
                 }
             }
             chrome::Command::PlayPause => self.toggle_preview(cx),
@@ -1871,6 +1925,77 @@ impl Studio {
             .child(tools)
     }
 
+    fn layer_open(&self) -> bool {
+        self.exit_ask || self.program_open || self.overlay.is_some() || self.ai_draft.is_some() || self.name_open || self.movement_open || self.tags_open || self.fx_open
+    }
+
+    fn dismiss_layer(&mut self, cx: &mut Context<Self>) {
+        if self.program_open {
+            self.program_open = false;
+        } else if self.overlay.is_some() {
+            self.overlay = None;
+        } else if self.ai_draft.is_some() {
+            self.close_ai(cx);
+            return;
+        } else if self.name_open {
+            self.name_open = false;
+        } else if self.movement_open {
+            self.movement_open = false;
+        } else if self.tags_open {
+            self.tags_open = false;
+        } else if self.fx_open {
+            self.fx_open = false;
+        }
+        cx.notify();
+    }
+
+    fn app_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        self.sync_program(window, cx);
+        let body = if self.program_open {
+            self.program_dialog(window, cx)
+        } else if let Some(overlay) = self.overlay {
+            self.overlay_page(overlay, cx)
+        } else if self.ai_draft.is_some() {
+            self.ai_panel(cx)
+        } else if self.name_open {
+            self.name_panel(cx).into_any_element()
+        } else if self.movement_open {
+            self.movement_panel(cx).into_any_element()
+        } else if self.tags_open {
+            div().flex().flex_col().gap(px(8.)).child(div().text_size(px(16.)).child("编辑曲目标签")).child(work::tag_form(self)).into_any_element()
+        } else if self.fx_open {
+            self.fx_panel(cx).into_any_element()
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .right(px(0.))
+                .bottom(px(0.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0x161226))
+                .child(
+                    div()
+                        .w(px(760.))
+                        .max_h(px(720.))
+                        .overflow_y_scroll()
+                        .bg(rgb(0xffffff))
+                        .text_color(rgb(0x222037))
+                        .border_1()
+                        .border_color(rgb(0xe5e1ed))
+                        .rounded(px(14.))
+                        .p(px(18.))
+                        .child(body),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn overlay_page(&mut self, overlay: Overlay, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let title = match overlay {
             Overlay::Cd => chrome::label::CD,
@@ -2044,17 +2169,13 @@ impl Render for Studio {
             set_text(&self.cover_detail, &design.detail, window, cx);
         }
         self.ensure_ai_fields(window, cx);
-        let overlay = self.overlay;
-        let page = if let Some(overlay) = overlay {
-            self.overlay_page(overlay, cx)
-        } else {
-            match self.page {
-                Page::Projects => self.projects_page(window, cx).into_any_element(),
-                Page::Split => self.split_page(cx),
-                Page::Scripts => self.scripts_page(cx),
-                Page::History => self.history_page(cx),
-                Page::Templates => self.templates_page(cx),
-            }
+        let popup = self.app_popup(window, cx);
+        let page = match self.page {
+            Page::Projects => self.projects_page(window, cx).into_any_element(),
+            Page::Split => self.split_page(cx),
+            Page::Scripts => self.scripts_page(cx),
+            Page::History => self.history_page(cx),
+            Page::Templates => self.templates_page(cx),
         };
         div()
             .relative()
@@ -2091,12 +2212,13 @@ impl Render for Studio {
                                     .track_scroll(&self.page_scroll)
                                     .px(px(30.))
                                     .py(px(24.))
-                                    .child(div().w_full().max_w(px(1540.)).flex().flex_col().gap(px(16.)).child(page).child(self.ai_panel(cx))),
+                                    .child(div().w_full().max_w(px(1540.)).flex().flex_col().gap(px(16.)).child(page)),
                             )
                             .child(vertical_scrollbar(self.page_scroll.clone(), self.page_scroll_grab.clone())),
                     )
                     .child(footer),
             )
+            .children(popup)
             .children(self.exit_ask.then(|| self.exit_prompt(cx)))
     }
 }
@@ -2510,6 +2632,16 @@ fn status_badge(status: &str) -> Div {
         _ => (0xf0eaf8, 0x5d3d98),
     };
     div().px(px(8.)).py(px(4.)).rounded(px(999.)).bg(rgb(background)).text_color(rgb(foreground)).text_size(px(11.)).child(status.to_string())
+}
+
+fn area_text(input: &Entity<TextareaState>, cx: &App) -> String {
+    input.read(cx).value().to_string()
+}
+
+fn set_area(input: &Entity<TextareaState>, value: &str, window: &mut Window, cx: &mut App) {
+    if input.read(cx).value().to_string() != value {
+        input.update(cx, |state, cx| state.set_value(value, window, cx));
+    }
 }
 
 fn text(input: &Entity<InputState>, cx: &App) -> String {
