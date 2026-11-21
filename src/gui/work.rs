@@ -2061,7 +2061,7 @@ impl Studio {
             .collect();
     }
 
-    pub(super) fn program_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    pub(super) fn program_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let title = if self.program_session { "识别场次信息" } else { "导入节目单" };
         let files = if self.program_files.is_empty() {
             "未选择文件".to_string()
